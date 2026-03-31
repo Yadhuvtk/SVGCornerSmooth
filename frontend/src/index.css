@@ -1,26 +1,19 @@
-:root {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  font-size: 14px;
-  color: #111827;
-  background: #f1f5f9;
-}
-
-* {
+﻿* {
   box-sizing: border-box;
-  margin: 0;
-  padding: 0;
 }
 
 html,
 body,
 #root {
+  width: 100%;
   height: 100%;
-  background: #f1f5f9;
+  margin: 0;
+  font-family: 'Segoe UI', 'Inter', sans-serif;
+  background: #050a14;
 }
 
 input,
 select,
 button {
   font-family: inherit;
-  font-size: inherit;
 }
