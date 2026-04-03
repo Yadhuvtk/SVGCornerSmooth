@@ -11,7 +11,9 @@ Highlights:
 - Radius profiles: `fixed`, `vectorizer_legacy`, `adaptive`, `preserve_shape`, `aggressive`
 - Safe rounding with shrink-on-failure validation
 - Flask API with analyze/round/process routes
-- React frontend with side-by-side preview, realtime parameter updates, diagnostics, and per-corner radius overrides
+- Simplified React frontend: choose SVG, one-click finalize, download output
+- Single-click pipeline runs: sharp-corner detection -> arc preview -> final rounding
+- Animated optimization progress UI for production-style processing feedback
 
 ## Architecture
 
@@ -169,12 +171,13 @@ Common response shape:
 ## Frontend workflow
 
 1. Upload SVG
-2. Click **Find Sharp Corners**
-3. Optionally click **Add Arc Preview**
-4. Adjust parameters (live preview updates automatically)
-5. Optionally set per-corner radius in table
-6. Click **Finalize Round**
-7. Download SVG / diagnostics JSON
+2. Click **Finalize SVG** (single click runs detect + arc preview + finalize round)
+3. Watch optimization progress animation while processing
+4. Download finalized SVG
+
+Notes:
+- Frontend is intentionally minimal for production flow.
+- Advanced tuning remains available via CLI/API options.
 
 ## Tests
 
