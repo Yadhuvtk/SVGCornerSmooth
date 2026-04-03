@@ -139,7 +139,7 @@ def detect_corners(
 
             prev_len = segment_length(prev_index)
             next_len = segment_length(next_index)
-            if prev_len < min_len or next_len < min_len:
+            if prev_len <= 1e-9 or next_len <= 1e-9:
                 continue
 
             join = next_seg.start
@@ -155,6 +155,12 @@ def detect_corners(
             angle_deg = math.degrees(math.acos(dot))
             join_type = classify_join(angle_deg, threshold)
             if join_type == "smooth":
+                continue
+
+            short_segment = prev_len < min_len or next_len < min_len
+            if short_segment and angle_deg < max(threshold + 8.0, 55.0):
+                # Keep tiny segments only when the turn is genuinely sharp.
+                # This avoids dropping real corners from glyph-style outlines.
                 continue
 
             hint = curvature_hint(prev_seg, next_seg, sample_count)

@@ -55,12 +55,13 @@ def _neighbor_distances(corners: list[CornerSeverity]) -> dict[str, tuple[float,
 
 def _legacy_candidates(entry: Any, options: ProcessingOptions) -> dict[int, Any]:
     """Build legacy corner candidates keyed by node id for rounding geometry."""
+    relaxed_min_segment = max(0.0, options.min_segment_length * 0.2)
     candidates = _legacy.detect_corners_in_path(
         path=entry.path,
         path_id=entry.path_id,
         angle_threshold=0.0,
         samples_per_curve=options.samples_per_curve,
-        min_segment_length=options.min_segment_length,
+        min_segment_length=relaxed_min_segment,
         debug=options.debug,
     )
     return {item.node_id: item for item in candidates}

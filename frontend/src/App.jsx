@@ -4,26 +4,12 @@ import PreviewPane from './components/PreviewPane'
 import { useSvgProcessor } from './hooks/useSvgProcessor'
 import { sanitizeSvg } from './lib/svgViewBox'
 
-const STAGES = [
-  { id: 'analyze', label: 'Find Sharp Corners' },
-  { id: 'preview', label: 'Add Arc Preview' },
-  { id: 'round', label: 'Finalize Round' },
-]
-
 const STAGE_STATUS_LABELS = {
   idle: 'Upload an SVG and click Finalize SVG',
   analyze: 'Finding sharp corners...',
   preview: 'Building arc preview circles...',
   round: 'Applying final corner rounding...',
   done: 'Optimization complete. Download is ready.',
-}
-
-const STAGE_INDEX = {
-  idle: -1,
-  analyze: 0,
-  preview: 1,
-  round: 2,
-  done: 3,
 }
 
 function formatFileSize(bytes) {
@@ -46,10 +32,13 @@ export default function App() {
     error,
     fatalError,
     pipelineStage,
-    stageProgress,
+    activeAction,
     showAnalyzeDelayMessage,
     selectFile,
     runFinalizePipeline,
+    runLegacyAnalyze,
+    runLegacyPreview,
+    runLegacyRound,
     downloadProcessedSvg,
     updateCornerOverride,
     resetCornerOverride,
@@ -65,14 +54,13 @@ export default function App() {
   const inputViewerMarkup = useMemo(() => sanitizeSvg(originalSvgText), [originalSvgText])
   const previewResetToken = inputFile ? `${inputFile.name}:${inputFile.lastModified}` : 'none'
   const previewSvg = processedSvgText || originalSvgText
-  const currentStageIndex = STAGE_INDEX[pipelineStage] ?? -1
   const hasOverrides = Object.keys(cornerOverrides).length > 0
 
   return (
     <div className="app-shell">
       <header className="simple-header">
         <h1>SVG Corner Smooth</h1>
-        <p>One-click production pipeline for corner detection, arc preview, and smooth rounded export.</p>
+        <p>Simple workflow: choose SVG, finalize, download.</p>
       </header>
 
       <main className="simple-main">
@@ -94,7 +82,7 @@ export default function App() {
 
             <div className="action-stack">
               <button className="primary-btn" disabled={!inputFile || loading} onClick={runFinalizePipeline}>
-                {loading ? STAGE_STATUS_LABELS[pipelineStage] : 'Finalize SVG'}
+                {loading && activeAction === 'finalize' ? STAGE_STATUS_LABELS[pipelineStage] : 'Finalize SVG'}
               </button>
               <button className="ghost-btn" disabled={!processedSvgText || loading} onClick={downloadProcessedSvg}>
                 Download SVG
@@ -105,34 +93,36 @@ export default function App() {
             </div>
           </section>
 
-          <section className="simple-card optimize-card">
-            <h2>Optimization Pipeline</h2>
-            <div className={`optimizer-visual ${loading ? 'is-active' : ''}`}>
-              <span />
-              <span />
-              <span />
+          <section className="simple-card">
+            <h2>Legacy</h2>
+            <div className="legacy-actions">
+              <button
+                className="ghost-btn"
+                disabled={!inputFile || loading}
+                onClick={runLegacyAnalyze}
+              >
+                {loading && activeAction === 'legacy-analyze' ? 'Finding...' : 'Find Sharp Corners'}
+              </button>
+              <button
+                className="ghost-btn"
+                disabled={!inputFile || loading}
+                onClick={runLegacyPreview}
+              >
+                {loading && activeAction === 'legacy-preview' ? 'Previewing...' : 'Add Arc Preview'}
+              </button>
+              <button
+                className="ghost-btn"
+                disabled={!inputFile || loading}
+                onClick={runLegacyRound}
+              >
+                {loading && activeAction === 'legacy-round' ? 'Finalizing...' : 'Finalize Round'}
+              </button>
             </div>
+          </section>
 
-            <div className="progress-track" aria-hidden="true">
-              <div className="progress-fill" style={{ width: `${Math.round(stageProgress * 100)}%` }} />
-            </div>
+          <section className="simple-card">
+            <h2>Status</h2>
             <p className="status-text">{STAGE_STATUS_LABELS[pipelineStage]}</p>
-
-            <div className="stage-list">
-              {STAGES.map((stage, index) => {
-                const isDone = pipelineStage === 'done' || index < currentStageIndex
-                const isActive = loading && index === currentStageIndex
-                return (
-                  <span
-                    key={stage.id}
-                    className={`stage-pill ${isDone ? 'is-done' : ''} ${isActive ? 'is-active' : ''}`}
-                  >
-                    {stage.label}
-                  </span>
-                )
-              })}
-            </div>
-
             <div className="mini-stats">
               <div>
                 <strong>{summary?.corners_found ?? 0}</strong>

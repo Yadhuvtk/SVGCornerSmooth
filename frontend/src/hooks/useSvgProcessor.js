@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { analyzeSvg, fetchProfiles, processSvgCompat, roundSvg } from '../lib/api'
 import { optimizeSvg } from '../lib/svgoOptimize'
 
@@ -17,14 +17,6 @@ const FINALIZE_PARAMS = Object.freeze({
   exactCurveTrim: true,
   debug: false,
 })
-
-const STAGE_PROGRESS = {
-  idle: 0,
-  analyze: 0.18,
-  preview: 0.62,
-  round: 0.9,
-  done: 1,
-}
 
 function readFileAsText(file) {
   return new Promise((resolve, reject) => {
@@ -68,6 +60,7 @@ export function useSvgProcessor() {
   const [arcPreview, setArcPreview] = useState([])
   const [pipelineStage, setPipelineStage] = useState('idle')
   const [loading, setLoading] = useState(false)
+  const [activeAction, setActiveAction] = useState('')
   const [showAnalyzeDelayMessage, setShowAnalyzeDelayMessage] = useState(false)
   const [error, setError] = useState('')
   const [fatalError, setFatalError] = useState(null)
@@ -133,7 +126,7 @@ export function useSvgProcessor() {
     setArcPreview(payload?.arc_preview || payload?.arcCircles || [])
   }, [])
 
-  const runFinalizePipeline = useCallback(async () => {
+  const withRequestState = useCallback(async (actionName, runner) => {
     if (!inputFile) {
       setError('Please upload an SVG first.')
       return
@@ -146,33 +139,59 @@ export function useSvgProcessor() {
     abortRef.current = controller
 
     setLoading(true)
+    setActiveAction(actionName)
     setError('')
     setShowAnalyzeDelayMessage(false)
-    const analyzeDelayTimer = setTimeout(() => {
-      if (!controller.signal.aborted) {
-        setShowAnalyzeDelayMessage(true)
-      }
-    }, 2000)
+
+    const shouldShowAnalyzeDelay = actionName === 'finalize' || actionName === 'legacy-analyze'
+    const analyzeDelayTimer = shouldShowAnalyzeDelay
+      ? setTimeout(() => {
+          if (!controller.signal.aborted) {
+            setShowAnalyzeDelayMessage(true)
+          }
+        }, 2000)
+      : null
 
     try {
+      await runner(controller.signal)
+    } catch (err) {
+      if (controller.signal.aborted) return
+      setError(err instanceof Error ? err.message : 'Failed to process SVG.')
+      if (isBackendOfflineError(err)) {
+        setFatalError(new Error('backend_offline'))
+      }
+      setPipelineStage('idle')
+    } finally {
+      if (analyzeDelayTimer) {
+        clearTimeout(analyzeDelayTimer)
+      }
+      setShowAnalyzeDelayMessage(false)
+      if (!controller.signal.aborted) {
+        setLoading(false)
+        setActiveAction('')
+      }
+    }
+  }, [inputFile])
+
+  const runFinalizePipeline = useCallback(async () => {
+    await withRequestState('finalize', async (signal) => {
       setPipelineStage('analyze')
       const analyzePayload = await analyzeSvg({
         file: inputFile,
         params: requestParamsForMode('analyze'),
-        signal: controller.signal,
+        signal,
       })
-      if (controller.signal.aborted) return
-      clearTimeout(analyzeDelayTimer)
-      setShowAnalyzeDelayMessage(false)
+      if (signal.aborted) return
       applyPayload(analyzePayload)
+      setProcessedSvgText(getSvgText(analyzePayload))
 
       setPipelineStage('preview')
       const previewPayload = await processSvgCompat({
         file: inputFile,
         params: requestParamsForMode('preview'),
-        signal: controller.signal,
+        signal,
       })
-      if (controller.signal.aborted) return
+      if (signal.aborted) return
       applyPayload(previewPayload)
       setProcessedSvgText(getSvgText(previewPayload))
 
@@ -184,29 +203,63 @@ export function useSvgProcessor() {
           cornerRadiusOverridesJson:
             Object.keys(cornerOverrides).length > 0 ? JSON.stringify(cornerOverrides) : undefined,
         },
-        signal: controller.signal,
+        signal,
       })
-      if (controller.signal.aborted) return
+      if (signal.aborted) return
       applyPayload(roundedPayload)
       setProcessedSvgText(optimizeSvg(getSvgText(roundedPayload)))
       setPipelineStage('done')
-    } catch (err) {
-      if (controller.signal.aborted) return
-      clearTimeout(analyzeDelayTimer)
-      setShowAnalyzeDelayMessage(false)
-      setError(err instanceof Error ? err.message : 'Failed to process SVG.')
-      if (isBackendOfflineError(err)) {
-        setFatalError(new Error('backend_offline'))
-      }
-      setPipelineStage('idle')
-    } finally {
-      clearTimeout(analyzeDelayTimer)
-      setShowAnalyzeDelayMessage(false)
-      if (!controller.signal.aborted) {
-        setLoading(false)
-      }
-    }
-  }, [applyPayload, cornerOverrides, inputFile])
+    })
+  }, [applyPayload, cornerOverrides, inputFile, withRequestState])
+
+  const runLegacyAnalyze = useCallback(async () => {
+    await withRequestState('legacy-analyze', async (signal) => {
+      setPipelineStage('analyze')
+      const payload = await analyzeSvg({
+        file: inputFile,
+        params: requestParamsForMode('analyze'),
+        signal,
+      })
+      if (signal.aborted) return
+      applyPayload(payload)
+      setProcessedSvgText(getSvgText(payload))
+      setPipelineStage('done')
+    })
+  }, [applyPayload, inputFile, withRequestState])
+
+  const runLegacyPreview = useCallback(async () => {
+    await withRequestState('legacy-preview', async (signal) => {
+      setPipelineStage('preview')
+      const payload = await processSvgCompat({
+        file: inputFile,
+        params: requestParamsForMode('preview'),
+        signal,
+      })
+      if (signal.aborted) return
+      applyPayload(payload)
+      setProcessedSvgText(getSvgText(payload))
+      setPipelineStage('done')
+    })
+  }, [applyPayload, inputFile, withRequestState])
+
+  const runLegacyRound = useCallback(async () => {
+    await withRequestState('legacy-round', async (signal) => {
+      setPipelineStage('round')
+      const payload = await roundSvg({
+        file: inputFile,
+        params: {
+          ...requestParamsForMode('round'),
+          cornerRadiusOverridesJson:
+            Object.keys(cornerOverrides).length > 0 ? JSON.stringify(cornerOverrides) : undefined,
+        },
+        signal,
+      })
+      if (signal.aborted) return
+      applyPayload(payload)
+      setProcessedSvgText(optimizeSvg(getSvgText(payload)))
+      setPipelineStage('done')
+    })
+  }, [applyPayload, cornerOverrides, inputFile, withRequestState])
 
   const updateCornerOverride = useCallback((key, rawValue) => {
     const text = String(rawValue ?? '').trim()
@@ -253,8 +306,6 @@ export function useSvgProcessor() {
     URL.revokeObjectURL(href)
   }, [processedSvgText])
 
-  const stageProgress = useMemo(() => STAGE_PROGRESS[pipelineStage] ?? 0, [pipelineStage])
-
   return {
     inputFile,
     originalSvgText,
@@ -265,13 +316,16 @@ export function useSvgProcessor() {
     arcPreview,
     pipelineStage,
     loading,
+    activeAction,
     showAnalyzeDelayMessage,
     error,
     fatalError,
-    stageProgress,
     cornerOverrides,
     selectFile,
     runFinalizePipeline,
+    runLegacyAnalyze,
+    runLegacyPreview,
+    runLegacyRound,
     downloadProcessedSvg,
     updateCornerOverride,
     resetCornerOverride,
