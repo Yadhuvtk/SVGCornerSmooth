@@ -1,104 +1,155 @@
-﻿import { useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import './App.css'
-import ControlsPanel from './components/ControlsPanel'
-import CornerTable from './components/CornerTable'
-import DiagnosticsPanel from './components/DiagnosticsPanel'
 import PreviewPane from './components/PreviewPane'
-import Toolbar from './components/Toolbar'
-import UploadPanel from './components/UploadPanel'
 import { useSvgProcessor } from './hooks/useSvgProcessor'
 import { sanitizeSvg } from './lib/svgViewBox'
+
+const STAGES = [
+  { id: 'analyze', label: 'Find Sharp Corners' },
+  { id: 'preview', label: 'Add Arc Preview' },
+  { id: 'round', label: 'Finalize Round' },
+]
+
+const STAGE_STATUS_LABELS = {
+  idle: 'Upload an SVG and click Finalize SVG',
+  analyze: 'Finding sharp corners...',
+  preview: 'Building arc preview circles...',
+  round: 'Applying final corner rounding...',
+  done: 'Optimization complete. Download is ready.',
+}
+
+const STAGE_INDEX = {
+  idle: -1,
+  analyze: 0,
+  preview: 1,
+  round: 2,
+  done: 3,
+}
+
+function formatFileSize(bytes) {
+  if (!bytes && bytes !== 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+}
 
 export default function App() {
   const {
     inputFile,
     originalSvgText,
     processedSvgText,
-    corners,
     summary,
     diagnostics,
-    params,
-    overlays,
-    profiles,
     loading,
     error,
-    activeAction,
-    selectedCornerKey,
-    selectedCorner,
-    cornerOverrides,
+    pipelineStage,
+    stageProgress,
     selectFile,
-    setParam,
-    setOverlay,
-    setCornerRadiusOverride,
-    setSelectedCornerKey,
-    runAction,
+    runFinalizePipeline,
     downloadProcessedSvg,
-    downloadDiagnostics,
+    loadingMode,
   } = useSvgProcessor()
 
   const [showInputViewer, setShowInputViewer] = useState(false)
 
-  const previewResetToken = inputFile ? `${inputFile.name}:${inputFile.lastModified}` : 'none'
   const inputViewerMarkup = useMemo(() => sanitizeSvg(originalSvgText), [originalSvgText])
+  const previewResetToken = inputFile ? `${inputFile.name}:${inputFile.lastModified}` : 'none'
+  const previewSvg = processedSvgText || originalSvgText
+  const currentStageIndex = STAGE_INDEX[pipelineStage] ?? -1
 
   return (
     <div className="app-shell">
-      <Toolbar loading={loading} activeAction={activeAction} summary={summary} />
+      <header className="simple-header">
+        <h1>SVG Corner Smooth</h1>
+        <p>One-click production pipeline for corner detection, arc preview, and smooth rounded export.</p>
+      </header>
 
-      <div className="app-body">
-        <aside className="sidebar">
-          <UploadPanel inputFile={inputFile} onFileSelect={selectFile} />
-          <ControlsPanel
-            params={params}
-            overlays={overlays}
-            profiles={profiles}
-            loading={loading}
-            activeAction={activeAction}
-            hasFile={Boolean(inputFile)}
-            onParam={setParam}
-            onOverlay={setOverlay}
-            onAnalyze={() => runAction('analyze')}
-            onPreview={() => runAction('preview')}
-            onRound={() => runAction('round')}
-            onDownloadSvg={downloadProcessedSvg}
-            onDownloadDiagnostics={downloadDiagnostics}
-          />
-          <DiagnosticsPanel summary={summary} diagnostics={diagnostics} error={error} loading={loading} />
-        </aside>
+      <main className="simple-main">
+        <aside className="simple-sidebar">
+          <section className="simple-card">
+            <h2>Choose SVG</h2>
+            <label className="file-input">
+              <input
+                type="file"
+                accept=".svg,image/svg+xml"
+                onChange={(event) => selectFile(event.target.files?.[0] || null)}
+              />
+              <span>Choose SVG File</span>
+            </label>
+            <div className="file-meta">
+              <strong>{inputFile ? inputFile.name : 'No file selected'}</strong>
+              <small>{inputFile ? formatFileSize(inputFile.size) : 'Upload an SVG to begin'}</small>
+            </div>
 
-        <main className="main-panel">
-          <div className="processed-head">
-            <h2>Processed Output</h2>
-            <div className="processed-head-actions">
-              <button
-                className="ghost-btn"
-                disabled={!originalSvgText}
-                onClick={() => setShowInputViewer(true)}
-              >
+            <div className="action-stack">
+              <button className="primary-btn" disabled={!inputFile || loading} onClick={runFinalizePipeline}>
+                {loading ? STAGE_STATUS_LABELS[pipelineStage] : 'Finalize SVG'}
+              </button>
+              <button className="ghost-btn" disabled={!processedSvgText || loading} onClick={downloadProcessedSvg}>
+                Download SVG
+              </button>
+              <button className="ghost-btn" disabled={!originalSvgText} onClick={() => setShowInputViewer(true)}>
                 View Input
               </button>
             </div>
-          </div>
+          </section>
 
+          <section className="simple-card optimize-card">
+            <h2>Optimization Pipeline</h2>
+            <div className={`optimizer-visual ${loading ? 'is-active' : ''}`}>
+              <span />
+              <span />
+              <span />
+            </div>
+
+            <div className="progress-track" aria-hidden="true">
+              <div className="progress-fill" style={{ width: `${Math.round(stageProgress * 100)}%` }} />
+            </div>
+            <p className="status-text">{STAGE_STATUS_LABELS[pipelineStage]}</p>
+
+            <div className="stage-list">
+              {STAGES.map((stage, index) => {
+                const isDone = pipelineStage === 'done' || index < currentStageIndex
+                const isActive = loading && index === currentStageIndex
+                return (
+                  <span
+                    key={stage.id}
+                    className={`stage-pill ${isDone ? 'is-done' : ''} ${isActive ? 'is-active' : ''}`}
+                  >
+                    {stage.label}
+                  </span>
+                )
+              })}
+            </div>
+
+            <div className="mini-stats">
+              <div>
+                <strong>{summary?.corners_found ?? 0}</strong>
+                <span>Corners Found</span>
+              </div>
+              <div>
+                <strong>{summary?.corners_rounded ?? 0}</strong>
+                <span>Corners Rounded</span>
+              </div>
+            </div>
+
+            {diagnostics?.warnings?.length ? (
+              <p className="warning-text">{diagnostics.warnings[0]}</p>
+            ) : null}
+            {error ? <p className="error-text">{error}</p> : null}
+          </section>
+        </aside>
+
+        <section className="preview-wrap">
           <PreviewPane
-            title="Processed"
-            svgText={processedSvgText}
-            selectedCorner={selectedCorner}
-            showHighlight
+            title={processedSvgText ? 'Finalized SVG' : 'SVG Preview'}
+            svgText={previewSvg}
             loading={loading}
-            loadingMode={activeAction}
+            loadingMode={loadingMode}
             resetToken={previewResetToken}
           />
-
-          <CornerTable
-            corners={corners}
-            selectedCornerKey={selectedCornerKey}
-            onSelectCorner={setSelectedCornerKey}
-            cornerOverrides={cornerOverrides}
-            onOverrideRadius={setCornerRadiusOverride}
-          />
-        </main>
-      </div>
+        </section>
+      </main>
 
       {showInputViewer ? (
         <div className="input-overlay" onClick={() => setShowInputViewer(false)}>

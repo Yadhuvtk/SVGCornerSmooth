@@ -1,8 +1,8 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { analyzeSvg, fetchProfiles, processSvgCompat, roundSvg } from '../lib/api'
 import { optimizeSvg } from '../lib/svgoOptimize'
 
-const DEFAULT_PARAMS = {
+const FINALIZE_PARAMS = Object.freeze({
   angleThreshold: 45,
   samplesPerCurve: 25,
   markerRadius: 3,
@@ -16,14 +16,14 @@ const DEFAULT_PARAMS = {
   skipInvalidCorners: true,
   exactCurveTrim: true,
   debug: false,
-  livePreview: true,
-}
+})
 
-const DEFAULT_OVERLAYS = {
-  cornerMarkers: true,
-  angleLabels: false,
-  radiusLabels: false,
-  rejectedCorners: true,
+const STAGE_PROGRESS = {
+  idle: 0,
+  analyze: 0.18,
+  preview: 0.62,
+  round: 0.9,
+  done: 1,
 }
 
 function readFileAsText(file) {
@@ -35,80 +35,64 @@ function readFileAsText(file) {
   })
 }
 
-function buildRequestParams({ params, overlays, cornerOverrides, mode }) {
-  const diagnosticsOverlay = overlays.angleLabels || overlays.radiusLabels || overlays.rejectedCorners
-
+function requestParamsForMode(mode) {
   return {
-    angleThreshold: params.angleThreshold,
-    samplesPerCurve: params.samplesPerCurve,
-    markerRadius: params.markerRadius,
-    minSegmentLength: params.minSegmentLength,
-    cornerRadius: params.cornerRadius,
-    radiusProfile: params.radiusProfile,
-    detectionMode: params.detectionMode,
-    maxRadiusShrinkIterations: params.maxRadiusShrinkIterations,
-    minAllowedRadius: params.minAllowedRadius,
-    intersectionSafetyMargin: params.intersectionSafetyMargin,
-    skipInvalidCorners: params.skipInvalidCorners,
-    exactCurveTrim: params.exactCurveTrim,
-    debug: params.debug || overlays.angleLabels || overlays.radiusLabels,
+    ...FINALIZE_PARAMS,
     applyRounding: mode === 'round',
     previewArcs: mode === 'preview',
-    exportMode:
-      mode === 'round'
-        ? 'apply_rounding'
-        : mode === 'preview'
-          ? 'preview_arcs'
-          : diagnosticsOverlay
-            ? 'diagnostics_overlay'
-            : 'markers_only',
-    cornerRadiusOverridesJson:
-      cornerOverrides && Object.keys(cornerOverrides).length > 0
-        ? JSON.stringify(cornerOverrides)
-        : undefined,
+    exportMode: mode === 'round' ? 'apply_rounding' : mode === 'preview' ? 'preview_arcs' : 'markers_only',
   }
+}
+
+function getSvgText(payload) {
+  return payload?.svg || payload?.processedSvg || ''
+}
+
+function normalizeStage(stage) {
+  return stage === 'idle' ? 'analyze' : stage
 }
 
 export function useSvgProcessor() {
   const [inputFile, setInputFile] = useState(null)
   const [originalSvgText, setOriginalSvgText] = useState('')
   const [processedSvgText, setProcessedSvgText] = useState('')
-  const [corners, setCorners] = useState([])
   const [summary, setSummary] = useState(null)
   const [diagnostics, setDiagnostics] = useState(null)
+  const [corners, setCorners] = useState([])
   const [arcPreview, setArcPreview] = useState([])
-  const [params, setParams] = useState(DEFAULT_PARAMS)
-  const [overlays, setOverlays] = useState(DEFAULT_OVERLAYS)
-  const [cornerOverrides, setCornerOverrides] = useState({})
-  const [selectedCornerKey, setSelectedCornerKey] = useState('')
-  const [profiles, setProfiles] = useState(null)
-  const [activeAction, setActiveAction] = useState('analyze')
+  const [pipelineStage, setPipelineStage] = useState('idle')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
   const abortRef = useRef(null)
-  const debounceRef = useRef(null)
 
   useEffect(() => {
     const controller = new AbortController()
     fetchProfiles(controller.signal)
-      .then((payload) => setProfiles(payload))
+      .then(() => {
+        if (controller.signal.aborted) return
+        setError('')
+      })
       .catch((err) => {
         if (controller.signal.aborted) return
         setError(err instanceof Error ? err.message : 'Failed to connect backend.')
       })
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      if (abortRef.current) {
+        abortRef.current.abort()
+      }
+    }
   }, [])
 
   const selectFile = useCallback(async (file) => {
     setError('')
     setProcessedSvgText('')
-    setCorners([])
     setSummary(null)
     setDiagnostics(null)
+    setCorners([])
     setArcPreview([])
-    setCornerOverrides({})
-    setSelectedCornerKey('')
+    setPipelineStage('idle')
 
     if (!file) {
       setInputFile(null)
@@ -128,102 +112,68 @@ export function useSvgProcessor() {
     setOriginalSvgText(text)
   }, [])
 
-  const setParam = useCallback((name, value) => {
-    setParams((prev) => ({ ...prev, [name]: value }))
+  const applyPayload = useCallback((payload) => {
+    setSummary(payload?.summary || null)
+    setDiagnostics(payload?.diagnostics || null)
+    setCorners(payload?.corners || [])
+    setArcPreview(payload?.arc_preview || payload?.arcCircles || [])
   }, [])
 
-  const setOverlay = useCallback((name, value) => {
-    setOverlays((prev) => ({ ...prev, [name]: value }))
-  }, [])
+  const runFinalizePipeline = useCallback(async () => {
+    if (!inputFile) {
+      setError('Please upload an SVG first.')
+      return
+    }
 
-  const setCornerRadiusOverride = useCallback((cornerKey, radius) => {
-    setCornerOverrides((prev) => {
-      const next = { ...prev }
-      if (!radius || Number(radius) <= 0) {
-        delete next[cornerKey]
-      } else {
-        next[cornerKey] = Number(radius)
-      }
-      return next
-    })
-  }, [])
+    if (abortRef.current) {
+      abortRef.current.abort()
+    }
+    const controller = new AbortController()
+    abortRef.current = controller
 
-  const runAction = useCallback(
-    async (mode, { silent = false } = {}) => {
-      if (!inputFile) {
-        setError('Please upload an SVG first.')
-        return
-      }
+    setLoading(true)
+    setError('')
 
-      setActiveAction(mode)
-      setError('')
-      setLoading(true)
-
-      if (abortRef.current) {
-        abortRef.current.abort()
-      }
-      const controller = new AbortController()
-      abortRef.current = controller
-
-      const requestParams = buildRequestParams({
-        params,
-        overlays,
-        cornerOverrides,
-        mode,
+    try {
+      setPipelineStage('analyze')
+      const analyzePayload = await analyzeSvg({
+        file: inputFile,
+        params: requestParamsForMode('analyze'),
+        signal: controller.signal,
       })
+      if (controller.signal.aborted) return
+      applyPayload(analyzePayload)
 
-      try {
-        const payload =
-          mode === 'round'
-            ? await roundSvg({ file: inputFile, params: requestParams, signal: controller.signal })
-            : mode === 'preview'
-              ? await processSvgCompat({ file: inputFile, params: requestParams, signal: controller.signal })
-              : await analyzeSvg({ file: inputFile, params: requestParams, signal: controller.signal })
+      setPipelineStage('preview')
+      const previewPayload = await processSvgCompat({
+        file: inputFile,
+        params: requestParamsForMode('preview'),
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted) return
+      applyPayload(previewPayload)
+      setProcessedSvgText(getSvgText(previewPayload))
 
-        const rawSvg = payload.svg || payload.processedSvg || ''
-        setProcessedSvgText(mode === 'round' ? optimizeSvg(rawSvg) : rawSvg)
-        setCorners(payload.corners || [])
-        setSummary(payload.summary || null)
-        setDiagnostics(payload.diagnostics || null)
-        setArcPreview(payload.arc_preview || payload.arcCircles || [])
-      } catch (err) {
-        if (controller.signal.aborted) return
-        setError(err instanceof Error ? err.message : 'Failed to process SVG.')
-        if (!silent) {
-          setProcessedSvgText('')
-          setCorners([])
-        }
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false)
-        }
-      }
-    },
-    [inputFile, params, overlays, cornerOverrides],
-  )
-
-  useEffect(() => {
-    if (!inputFile || !params.livePreview) return
-
-    if (debounceRef.current) {
-      window.clearTimeout(debounceRef.current)
-    }
-
-    debounceRef.current = window.setTimeout(() => {
-      runAction(activeAction, { silent: true })
-    }, 320)
-
-    return () => {
-      if (debounceRef.current) {
-        window.clearTimeout(debounceRef.current)
+      setPipelineStage('round')
+      const roundedPayload = await roundSvg({
+        file: inputFile,
+        params: requestParamsForMode('round'),
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted) return
+      applyPayload(roundedPayload)
+      setProcessedSvgText(optimizeSvg(getSvgText(roundedPayload)))
+      setPipelineStage('done')
+    } catch (err) {
+      if (controller.signal.aborted) return
+      setError(err instanceof Error ? err.message : 'Failed to process SVG.')
+      setPipelineStage('idle')
+    } finally {
+      if (!controller.signal.aborted) {
+        setLoading(false)
       }
     }
-  }, [inputFile, params, overlays, cornerOverrides, activeAction, runAction])
-
-  const selectedCorner = useMemo(() => {
-    if (!selectedCornerKey) return null
-    return corners.find((corner) => `${corner.path_id}:${corner.node_id}` === selectedCornerKey) || null
-  }, [corners, selectedCornerKey])
+  }, [applyPayload, inputFile])
 
   const downloadProcessedSvg = useCallback(() => {
     if (!processedSvgText) return
@@ -231,55 +181,30 @@ export function useSvgProcessor() {
     const href = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = href
-    anchor.download = activeAction === 'round' ? 'rounded.svg' : 'analyzed.svg'
+    anchor.download = 'finalized.svg'
     document.body.appendChild(anchor)
     anchor.click()
     anchor.remove()
     URL.revokeObjectURL(href)
-  }, [processedSvgText, activeAction])
+  }, [processedSvgText])
 
-  const downloadDiagnostics = useCallback(() => {
-    const payload = {
-      summary,
-      diagnostics,
-      corners,
-      arc_preview: arcPreview,
-    }
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
-    const href = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = href
-    anchor.download = 'svg-corner-diagnostics.json'
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    URL.revokeObjectURL(href)
-  }, [summary, diagnostics, corners, arcPreview])
+  const stageProgress = useMemo(() => STAGE_PROGRESS[pipelineStage] ?? 0, [pipelineStage])
 
   return {
     inputFile,
     originalSvgText,
     processedSvgText,
-    corners,
     summary,
     diagnostics,
+    corners,
     arcPreview,
-    params,
-    overlays,
-    profiles,
+    pipelineStage,
     loading,
     error,
-    activeAction,
-    selectedCornerKey,
-    selectedCorner,
-    cornerOverrides,
+    stageProgress,
     selectFile,
-    setParam,
-    setOverlay,
-    setCornerRadiusOverride,
-    setSelectedCornerKey,
-    runAction,
+    runFinalizePipeline,
     downloadProcessedSvg,
-    downloadDiagnostics,
+    loadingMode: normalizeStage(pipelineStage),
   }
 }
