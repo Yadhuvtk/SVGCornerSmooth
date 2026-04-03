@@ -1,5 +1,6 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { analyzeSvg, fetchProfiles, processSvgCompat, roundSvg } from '../lib/api'
+import { optimizeSvg } from '../lib/svgoOptimize'
 
 const DEFAULT_PARAMS = {
   angleThreshold: 45,
@@ -176,7 +177,8 @@ export function useSvgProcessor() {
               ? await processSvgCompat({ file: inputFile, params: requestParams, signal: controller.signal })
               : await analyzeSvg({ file: inputFile, params: requestParams, signal: controller.signal })
 
-        setProcessedSvgText(payload.svg || payload.processedSvg || '')
+        const rawSvg = payload.svg || payload.processedSvg || ''
+        setProcessedSvgText(mode === 'round' ? optimizeSvg(rawSvg) : rawSvg)
         setCorners(payload.corners || [])
         setSummary(payload.summary || null)
         setDiagnostics(payload.diagnostics || null)

@@ -189,9 +189,17 @@ def effective_corner_radius(corner: CornerDetection, requested_radius: float, ra
     `fixed`: returns requested radius.
     `vectorizer`: adapts radius so wider turns (around 100-120 degrees) get
     smaller fillets, which usually preserves silhouette quality better.
+
+    Note: this legacy helper only knows `fixed` and `vectorizer`.
+    Modern profiles (`adaptive`, `preserve_shape`, `aggressive`, etc.) are
+    treated as `fixed` to avoid unintended aggressive shrink in legacy overlays.
     """
     if requested_radius <= 0.0:
         return 0.0
+
+    if radius_profile not in {"fixed", "vectorizer"}:
+        return requested_radius
+
     if radius_profile == "fixed":
         return requested_radius
 
@@ -562,12 +570,10 @@ def append_arc_preview_circles(
     debug: bool,
 ) -> list[dict]:
     """
-    Draw full inscribed circles + arc paths for arc-preview mode.
+    Draw simple full-circle previews for arc-preview mode.
 
     For each corner this overlays:
-      - A dashed semi-transparent circle (the full inscribed circle)
-      - The actual fillet arc in solid red
-      - Small dots at the two tangent points
+      - A clean circle outline centered on the fillet center point
     Returns a list of dicts with arc-circle metadata for the UI table.
     """
     overlay_group = ET.Element(svg_tag(namespace, "g"), {"id": "arc-preview-overlay"})
@@ -589,48 +595,20 @@ def append_arc_preview_circles(
             debug_log(debug, f"Path {corner.path_id} node {corner.node_id}: arc geometry unavailable for preview.")
             continue
 
-        arc_start, arc_end, arc_center, used_radius = arc_geometry
+        _arc_start, _arc_end, arc_center, used_radius = arc_geometry
         cx = arc_center.real
         cy = arc_center.imag
 
-        # Full inscribed circle — dashed outline + faint fill so the user can see the whole circle
+        # Minimal arc preview: circle only (no tangent dots / arc path clutter).
         overlay_group.append(ET.Element(svg_tag(namespace, "circle"), {
             "cx": f"{cx:.4f}",
             "cy": f"{cy:.4f}",
             "r": f"{used_radius:.4f}",
-            "fill": "rgba(255,0,0,0.06)",
+            "fill": "none",
             "stroke": "#e53e3e",
-            "stroke-width": "1.5",
-            "stroke-dasharray": "4 3",
-            "opacity": "0.75",
-        }))
-
-        # Solid fillet arc
-        arc_path_d = build_svg_arc_path_d(arc_start, arc_end, arc_center, used_radius)
-        if arc_path_d:
-            overlay_group.append(ET.Element(svg_tag(namespace, "path"), {
-                "d": arc_path_d,
-                "fill": "none",
-                "stroke": "#e53e3e",
-                "stroke-width": "2.5",
-                "stroke-linecap": "round",
-            }))
-
-        # Tangent start dot
-        overlay_group.append(ET.Element(svg_tag(namespace, "circle"), {
-            "cx": f"{arc_start.real:.4f}",
-            "cy": f"{arc_start.imag:.4f}",
-            "r": "3",
-            "fill": "#e53e3e",
-            "opacity": "0.85",
-        }))
-        # Tangent end dot
-        overlay_group.append(ET.Element(svg_tag(namespace, "circle"), {
-            "cx": f"{arc_end.real:.4f}",
-            "cy": f"{arc_end.imag:.4f}",
-            "r": "3",
-            "fill": "#e53e3e",
-            "opacity": "0.85",
+            "stroke-width": "2",
+            "opacity": "0.95",
+            "vector-effect": "non-scaling-stroke",
         }))
 
         arc_circles.append({
@@ -1131,6 +1109,44 @@ def crop_segment(segment: Any, t_start: float, t_end: float) -> Optional[Any]:
         return Line(start_point, end_point)
 
 
+_ARC_START_SNAP_TOLERANCE = 1e-9
+_COLLINEAR_COS_THRESHOLD = math.cos(math.radians(0.5))
+
+
+def _arc_with_snapped_start(arc: Arc, new_start: complex) -> Arc:
+    """Return copy of arc with start snapped to new_start to fix de Casteljau float error."""
+    return Arc(
+        start=new_start,
+        radius=arc.radius,
+        rotation=arc.rotation,
+        large_arc=arc.large_arc,
+        sweep=arc.sweep,
+        end=arc.end,
+    )
+
+
+def _merge_collinear_lines(segments: list[Any]) -> list[Any]:
+    """Merge consecutive collinear Line segments and drop zero-length ones."""
+    if len(segments) <= 1:
+        return segments
+
+    merged: list[Any] = []
+    for seg in segments:
+        if abs(seg.end - seg.start) <= EPSILON:
+            continue  # drop zero-length
+        if merged and isinstance(merged[-1], Line) and isinstance(seg, Line):
+            dir_prev = normalize_vector(merged[-1].end - merged[-1].start)
+            dir_curr = normalize_vector(seg.end - seg.start)
+            if dir_prev is not None and dir_curr is not None:
+                dot = (dir_prev.real * dir_curr.real) + (dir_prev.imag * dir_curr.imag)
+                if dot >= _COLLINEAR_COS_THRESHOLD:
+                    merged[-1] = Line(merged[-1].start, seg.end)
+                    continue
+        merged.append(seg)
+
+    return merged if merged else segments
+
+
 def build_corner_rounding(
     path: Path,
     corner: CornerDetection,
@@ -1294,6 +1310,56 @@ def round_path_geometry(
                 continue
             rounding_by_node[node_index] = rounding
 
+        # Prevent neighboring corners from over-trimming the same segment.
+        # When t_start >= t_end on a segment, that segment collapses and may break
+        # path continuity (causing large fill artifacts on closed shapes).
+        if len(rounding_by_node) > 1:
+            changed = True
+            conflict_tolerance = 1e-6
+            while changed:
+                changed = False
+                for local_segment in range(segment_count):
+                    segment_index = start + local_segment
+                    if subpath_closed:
+                        end_node_index = start + ((local_segment + 1) % segment_count)
+                    else:
+                        end_node_index = start + local_segment + 1
+                        if end_node_index >= end:
+                            continue
+
+                    start_rounding = rounding_by_node.get(segment_index)
+                    end_rounding = rounding_by_node.get(end_node_index)
+                    if start_rounding is None or end_rounding is None:
+                        continue
+
+                    t_start = clamp(start_rounding.next_trim_t, 0.0, 1.0)
+                    t_end = clamp(end_rounding.prev_trim_t, 0.0, 1.0)
+                    if t_start + conflict_tolerance < t_end:
+                        continue
+
+                    # Drop whichever corner trims more of this shared segment.
+                    start_trim = max(0.0, t_start)
+                    end_trim = max(0.0, 1.0 - t_end)
+                    if start_trim >= end_trim:
+                        removed_node = segment_index
+                    else:
+                        removed_node = end_node_index
+
+                    removed = rounding_by_node.pop(removed_node, None)
+                    if removed is None:
+                        continue
+                    changed = True
+                    if debug:
+                        debug_log(
+                            debug,
+                            (
+                                f"Path {path_id} node {removed_node}: dropped overlapping fillet "
+                                f"(segment={segment_index}, t_start={t_start:.4f}, t_end={t_end:.4f})."
+                            ),
+                        )
+                    break
+
+        subpath_segments: list[Any] = []
         for local_segment in range(segment_count):
             segment_index = start + local_segment
             segment = path[segment_index]
@@ -1310,7 +1376,7 @@ def round_path_geometry(
 
             cropped_segment = crop_segment(segment, t_start, t_end)
             if cropped_segment is not None:
-                rounded_segments.append(cropped_segment)
+                subpath_segments.append(cropped_segment)
             elif debug:
                 debug_log(
                     debug,
@@ -1323,12 +1389,24 @@ def round_path_geometry(
             if subpath_closed:
                 corner_after = rounding_by_node.get(end_node_index)
                 if corner_after is not None and corner_after.prev_index == segment_index:
-                    rounded_segments.append(corner_after.arc_segment)
+                    arc = corner_after.arc_segment
+                    if subpath_segments:
+                        prev_end = subpath_segments[-1].end
+                        if arc.start != prev_end and abs(arc.start - prev_end) < _ARC_START_SNAP_TOLERANCE:
+                            arc = _arc_with_snapped_start(arc, prev_end)
+                    subpath_segments.append(arc)
             else:
                 if end_node_index < end:
                     corner_after = rounding_by_node.get(end_node_index)
                     if corner_after is not None and corner_after.prev_index == segment_index:
-                        rounded_segments.append(corner_after.arc_segment)
+                        arc = corner_after.arc_segment
+                        if subpath_segments:
+                            prev_end = subpath_segments[-1].end
+                            if arc.start != prev_end and abs(arc.start - prev_end) < _ARC_START_SNAP_TOLERANCE:
+                                arc = _arc_with_snapped_start(arc, prev_end)
+                        subpath_segments.append(arc)
+
+        rounded_segments.extend(_merge_collinear_lines(subpath_segments))
 
     if not rounded_segments:
         return path

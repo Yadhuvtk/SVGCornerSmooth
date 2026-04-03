@@ -374,6 +374,11 @@
   cursor: grabbing;
 }
 
+.preview-canvas.is-middle-zooming,
+.preview-canvas.is-middle-zooming:active {
+  cursor: ns-resize;
+}
+
 .preview-empty {
   color: #666;
   padding: 20px;
@@ -381,10 +386,13 @@
 }
 
 .svg-stage {
+  position: absolute;
+  top: 0;
+  left: 0;
   transform-origin: 0 0;
   width: 100%;
   height: 100%;
-  transition: transform 90ms linear, opacity 240ms ease;
+  transition: opacity 240ms ease;
   animation: fadeIn 240ms ease;
 }
 

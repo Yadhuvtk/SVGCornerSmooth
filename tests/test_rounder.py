@@ -1,5 +1,8 @@
-﻿from pathlib import Path
+from pathlib import Path
 
+from svgpathtools import parse_path
+
+from svg_corner_smooth import _legacy
 from svg_corner_smooth.parser import parse_svg_document
 from svg_corner_smooth.rounder import analyze_svg, process_svg
 from svg_corner_smooth.validate import build_options
@@ -40,3 +43,30 @@ def test_analyze_pipeline_returns_diagnostics() -> None:
     result = analyze_svg(svg_bytes, options)
     assert result.summary.paths_found >= 1
     assert result.diagnostics.mode == "preserve_shape"
+
+
+def test_round_geometry_keeps_closed_path_continuous_when_segment_trims_overlap() -> None:
+    path = parse_path("M0,0 L8,0 L8,1 L0,1 Z")
+    corners = _legacy.detect_corners_in_path(
+        path=path,
+        path_id=0,
+        angle_threshold=20.0,
+        samples_per_curve=25,
+        min_segment_length=0.0,
+        debug=False,
+    )
+
+    rounded = _legacy.round_path_geometry(
+        path=path,
+        path_id=0,
+        corners=corners,
+        desired_radius=4.0,
+        radius_profile="fixed",
+        samples_per_curve=25,
+        debug=False,
+    )
+
+    ranges = _legacy.split_subpaths(rounded)
+    assert len(ranges) == 1
+    start, end = ranges[0]
+    assert abs(rounded[start].start - rounded[end - 1].end) <= _legacy.CONTINUITY_TOLERANCE

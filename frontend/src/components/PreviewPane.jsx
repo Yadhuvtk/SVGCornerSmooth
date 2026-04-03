@@ -3,9 +3,39 @@ import { sanitizeSvg, withCornerHighlight } from '../lib/svgViewBox'
 
 const ZOOM_MIN = 0.08
 const ZOOM_MAX = 32
+const ZOOM_BUTTON_STEP = 1.1
+const ZOOM_WHEEL_SPEED = 0.0015
+const ZOOM_WHEEL_MULTIPLIER_MIN = 0.85
+const ZOOM_WHEEL_MULTIPLIER_MAX = 1.2
+const ZOOM_MIDDLE_DRAG_SPEED = 0.008
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value))
+}
+
+function wheelMultiplierFromDelta(deltaY) {
+  const raw = Math.exp(-deltaY * ZOOM_WHEEL_SPEED)
+  return clamp(raw, ZOOM_WHEEL_MULTIPLIER_MIN, ZOOM_WHEEL_MULTIPLIER_MAX)
+}
+
+function normalizeWheelDelta(deltaY, deltaMode) {
+  // Some devices emit wheel values in "lines" or "pages" instead of pixels.
+  if (deltaMode === 1) return deltaY * 40
+  if (deltaMode === 2) return deltaY * 800
+  return deltaY
+}
+
+function snapToDevicePixel(value) {
+  if (typeof window === 'undefined') return value
+  const dpr = window.devicePixelRatio || 1
+  return Math.round(value * dpr) / dpr
+}
+
+function snapPan(point) {
+  return {
+    x: snapToDevicePixel(point.x),
+    y: snapToDevicePixel(point.y),
+  }
 }
 
 function modeLabel(mode) {
@@ -25,31 +55,57 @@ export default function PreviewPane({
 }) {
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [isMiddleZooming, setIsMiddleZooming] = useState(false)
 
   const dragRef = useRef(null)
+  const middleZoomRef = useRef(null)
   const canvasRef = useRef(null)
   const pointerRef = useRef({ x: 0, y: 0, inside: false })
   const zoomRef = useRef(zoom)
+  const panRef = useRef(pan)
 
   useEffect(() => {
     zoomRef.current = zoom
   }, [zoom])
 
+  useEffect(() => {
+    panRef.current = pan
+  }, [pan])
+
   // Reset zoom only when source file changes, not every output refresh.
   useEffect(() => {
+    zoomRef.current = 1
+    panRef.current = snapPan({ x: 0, y: 0 })
     setZoom(1)
-    setPan({ x: 0, y: 0 })
+    setPan(snapPan({ x: 0, y: 0 }))
   }, [resetToken])
 
   useEffect(() => {
     function onMove(event) {
+      pointerRef.current = { x: event.clientX, y: event.clientY, inside: true }
+
+      if (middleZoomRef.current) {
+        const { startY, startZoom } = middleZoomRef.current
+        const deltaY = event.clientY - startY
+        const multiplier = Math.exp(-deltaY * ZOOM_MIDDLE_DRAG_SPEED)
+        zoomTo(startZoom * multiplier, event.clientX, event.clientY)
+        return
+      }
+
       if (!dragRef.current) return
       const { startX, startY, startPan } = dragRef.current
-      setPan({ x: startPan.x + (event.clientX - startX), y: startPan.y + (event.clientY - startY) })
+      const nextPan = snapPan({
+        x: startPan.x + (event.clientX - startX),
+        y: startPan.y + (event.clientY - startY),
+      })
+      panRef.current = nextPan
+      setPan(nextPan)
     }
 
     function onUp() {
       dragRef.current = null
+      middleZoomRef.current = null
+      setIsMiddleZooming(false)
     }
 
     window.addEventListener('mousemove', onMove)
@@ -83,27 +139,29 @@ export default function PreviewPane({
   }
 
   function zoomTo(targetZoom, anchorClientX, anchorClientY) {
-    setZoom((previousZoom) => {
-      const nextZoom = clamp(targetZoom, ZOOM_MIN, ZOOM_MAX)
-      if (Math.abs(nextZoom - previousZoom) < 1e-9) {
-        return previousZoom
-      }
+    const previousZoom = zoomRef.current
+    const nextZoom = clamp(targetZoom, ZOOM_MIN, ZOOM_MAX)
+    if (Math.abs(nextZoom - previousZoom) < 1e-9) {
+      return
+    }
 
-      const anchor = getCanvasAnchor(anchorClientX, anchorClientY)
-      if (anchor) {
-        setPan((previousPan) => {
-          // Keep the same content point under the anchor after zoom.
-          const worldX = (anchor.x - previousPan.x) / previousZoom
-          const worldY = (anchor.y - previousPan.y) / previousZoom
-          return {
-            x: anchor.x - worldX * nextZoom,
-            y: anchor.y - worldY * nextZoom,
-          }
-        })
-      }
+    const anchor = getCanvasAnchor(anchorClientX, anchorClientY)
+    let nextPan = panRef.current
+    if (anchor) {
+      const previousPan = panRef.current
+      // Keep the same content point under the cursor while zooming.
+      const worldX = (anchor.x - previousPan.x) / previousZoom
+      const worldY = (anchor.y - previousPan.y) / previousZoom
+      nextPan = snapPan({
+        x: anchor.x - worldX * nextZoom,
+        y: anchor.y - worldY * nextZoom,
+      })
+    }
 
-      return nextZoom
-    })
+    zoomRef.current = nextZoom
+    panRef.current = nextPan
+    setZoom(nextZoom)
+    setPan(nextPan)
   }
 
   function zoomUsingPointer(multiplier) {
@@ -115,23 +173,14 @@ export default function PreviewPane({
     zoomTo(zoomRef.current * multiplier)
   }
 
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-
-    function onNativeWheel(event) {
-      event.preventDefault()
-      event.stopPropagation()
-      pointerRef.current = { x: event.clientX, y: event.clientY, inside: true }
-      const multiplier = event.deltaY < 0 ? 1.12 : 1 / 1.12
-      zoomTo(zoomRef.current * multiplier, event.clientX, event.clientY)
-    }
-
-    canvas.addEventListener('wheel', onNativeWheel, { passive: false })
-    return () => {
-      canvas.removeEventListener('wheel', onNativeWheel)
-    }
-  }, [])
+  function onWheel(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    pointerRef.current = { x: event.clientX, y: event.clientY, inside: true }
+    const normalizedDelta = normalizeWheelDelta(event.deltaY, event.deltaMode)
+    const multiplier = wheelMultiplierFromDelta(normalizedDelta)
+    zoomTo(zoomRef.current * multiplier, event.clientX, event.clientY)
+  }
 
   function onMouseMove(event) {
     pointerRef.current = { x: event.clientX, y: event.clientY, inside: true }
@@ -142,17 +191,30 @@ export default function PreviewPane({
   }
 
   function onMouseDown(event) {
+    if (event.button === 1) {
+      event.preventDefault()
+      middleZoomRef.current = {
+        startY: event.clientY,
+        startZoom: zoomRef.current,
+      }
+      setIsMiddleZooming(true)
+      return
+    }
+
     if (event.button !== 0) return
     dragRef.current = {
       startX: event.clientX,
       startY: event.clientY,
-      startPan: { ...pan },
+      startPan: { ...panRef.current },
     }
   }
 
   function resetView() {
+    const resetPan = snapPan({ x: 0, y: 0 })
+    zoomRef.current = 1
+    panRef.current = resetPan
     setZoom(1)
-    setPan({ x: 0, y: 0 })
+    setPan(resetPan)
   }
 
   return (
@@ -163,12 +225,12 @@ export default function PreviewPane({
           <div className="preview-badge">zoom: {zoom.toFixed(2)}x</div>
         </div>
         <div className="zoom-controls">
-          <button onClick={() => zoomUsingPointer(1 / 1.2)}>-</button>
+          <button onClick={() => zoomUsingPointer(1 / ZOOM_BUTTON_STEP)}>-</button>
           <input
             type="range"
             min={ZOOM_MIN}
             max={ZOOM_MAX}
-            step={0.01}
+            step={0.005}
             value={zoom}
             onChange={(event) => {
               const pointer = pointerRef.current
@@ -179,19 +241,21 @@ export default function PreviewPane({
               }
             }}
           />
-          <button onClick={() => zoomUsingPointer(1.2)}>+</button>
+          <button onClick={() => zoomUsingPointer(ZOOM_BUTTON_STEP)}>+</button>
           <button onClick={resetView}>Fit</button>
         </div>
       </header>
 
       <div
         ref={canvasRef}
-        className="preview-canvas"
-        onWheelCapture={(event) => {
-          event.preventDefault()
-          event.stopPropagation()
-        }}
+        className={`preview-canvas ${isMiddleZooming ? 'is-middle-zooming' : ''}`}
+        onWheel={onWheel}
         onMouseDown={onMouseDown}
+        onAuxClick={(event) => {
+          if (event.button === 1) {
+            event.preventDefault()
+          }
+        }}
         onMouseMove={onMouseMove}
         onMouseLeave={onMouseLeave}
         onDoubleClick={resetView}
@@ -201,7 +265,11 @@ export default function PreviewPane({
         ) : (
           <div
             className={`svg-stage ${loading ? 'is-loading' : ''}`}
-            style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+            style={{
+              transform: `translate(${pan.x}px, ${pan.y}px)`,
+              width: `${zoom * 100}%`,
+              height: `${zoom * 100}%`,
+            }}
             dangerouslySetInnerHTML={{ __html: displaySvg }}
           />
         )}
