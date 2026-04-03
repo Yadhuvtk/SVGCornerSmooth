@@ -14,16 +14,24 @@ async function sendSvgRequest(path, { file, params, signal }) {
     form.append(key, String(value))
   })
 
-  const response = await fetch(endpoint(path), {
-    method: 'POST',
-    body: form,
-    signal,
-  })
+  let response
+  try {
+    response = await fetch(endpoint(path), {
+      method: 'POST',
+      body: form,
+      signal,
+    })
+  } catch (error) {
+    throw new Error('Cannot reach SVGCornerSmooth backend. Start `python api_server.py` (default: 127.0.0.1:5050).')
+  }
 
   const payload = await response.json().catch(() => ({}))
   if (!response.ok || payload?.ok === false) {
     const message = payload?.error || `Request failed (${response.status})`
     throw new Error(message)
+  }
+  if (payload?.diagnostics?.source === 'svg_passthrough') {
+    throw new Error('Connected API is not SVGCornerSmooth backend. Start this project backend on 127.0.0.1:5050.')
   }
   return payload
 }
@@ -41,10 +49,19 @@ export function processSvgCompat({ file, params, signal }) {
 }
 
 export async function fetchProfiles(signal) {
-  const response = await fetch(endpoint('/api/profiles'), { signal })
+  let response
+  try {
+    response = await fetch(endpoint('/api/profiles'), { signal })
+  } catch (error) {
+    throw new Error('Cannot reach SVGCornerSmooth backend. Start `python api_server.py` (default: 127.0.0.1:5050).')
+  }
   const payload = await response.json().catch(() => ({}))
   if (!response.ok || payload?.ok === false) {
     throw new Error(payload?.error || 'Failed to load profiles')
+  }
+  const hasExpectedSchema = Array.isArray(payload?.detection_modes) && Array.isArray(payload?.radius_profiles)
+  if (!hasExpectedSchema) {
+    throw new Error('Connected API is not SVGCornerSmooth backend. Start this project backend on 127.0.0.1:5050.')
   }
   return payload
 }

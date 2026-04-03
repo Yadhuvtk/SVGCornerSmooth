@@ -93,7 +93,10 @@ export function useSvgProcessor() {
     const controller = new AbortController()
     fetchProfiles(controller.signal)
       .then((payload) => setProfiles(payload))
-      .catch(() => undefined)
+      .catch((err) => {
+        if (controller.signal.aborted) return
+        setError(err instanceof Error ? err.message : 'Failed to connect backend.')
+      })
     return () => controller.abort()
   }, [])
 

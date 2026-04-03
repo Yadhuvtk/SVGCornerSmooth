@@ -99,10 +99,12 @@ Compatibility entrypoint is preserved:
 python api_server.py
 ```
 
+By default the backend listens on `http://127.0.0.1:5050` (override with `SVG_BACKEND_PORT`).
+
 Or package app:
 
 ```bash
-python -m flask --app backend.app:create_app run
+python -m flask --app backend.app:create_app run --port 5050
 ```
 
 ### Frontend
@@ -111,6 +113,8 @@ python -m flask --app backend.app:create_app run
 cd frontend
 npm run dev
 ```
+
+Dev proxy targets `http://127.0.0.1:5050` by default (override with `VITE_PROXY_TARGET`).
 
 ## API
 

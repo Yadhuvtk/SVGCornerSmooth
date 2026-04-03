@@ -13,6 +13,7 @@ app = create_app()
 
 if __name__ == "__main__":
     host = os.getenv("SVG_BACKEND_HOST", "127.0.0.1")
-    port = int(os.getenv("SVG_BACKEND_PORT", "5000"))
+    # Default to 5050 to avoid common collisions with other local services on 5000.
+    port = int(os.getenv("SVG_BACKEND_PORT", "5050"))
     debug = os.getenv("SVG_BACKEND_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
     app.run(host=host, port=port, debug=debug)
