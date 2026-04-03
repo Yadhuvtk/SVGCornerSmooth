@@ -10,7 +10,12 @@ Highlights:
 - Detection modes: `fast`, `accurate`, `preserve_shape`
 - Radius profiles: `fixed`, `vectorizer_legacy`, `adaptive`, `preserve_shape`, `aggressive`
 - Safe rounding with shrink-on-failure validation
+- Robust fillet solver fallback (`ok` / `shrunk` / `skipped`) with rejection reasons
+- Cross-path adjacency-aware radius constraints for shared boundary endpoints
 - Flask API with analyze/round/process routes
+- API input guards (content-type, empty body, malformed SVG, 5 MB limit)
+- Analyze-result cache (`X-Cache: HIT|MISS`) + `DELETE /api/cache`
+- Gunicorn production entrypoint (`backend/wsgi.py`)
 - Simplified React frontend: choose SVG, one-click finalize, download output
 - Single-click pipeline runs: sharp-corner detection -> arc preview -> final rounding
 - Animated optimization progress UI for production-style processing feedback
@@ -34,20 +39,27 @@ svg_corner_smooth/
   tangents.py
   utils.py
   validate.py
+  legacy_runtime.py
 
 backend/
   __init__.py
   app.py
   config.py
   schemas.py
+  wsgi.py
 
 tests/
   fixtures/
+    simple_rect.svg
+    malformed.svg
+  test_api.py
+  test_adjacency.py
   test_parser.py
   test_tangents.py
   test_detect.py
   test_radius_profiles.py
   test_fillet.py
+  test_legacy_runtime.py
   test_rounder.py
 
 frontend/
@@ -74,6 +86,14 @@ npm install
 ```
 
 ## Run
+
+### One-click (Windows)
+
+```bat
+run_all.bat
+```
+
+This launches backend and frontend together in two terminal windows.
 
 ### CLI
 
@@ -109,6 +129,19 @@ Or package app:
 python -m flask --app backend.app:create_app run --port 5050
 ```
 
+Production (Gunicorn):
+
+```bash
+make run-prod
+```
+
+Equivalent commands:
+
+```bash
+make run-dev
+gunicorn backend.wsgi:app --workers 2 --timeout 120 --bind 127.0.0.1:5050 --log-level info
+```
+
 ### Frontend
 
 ```bash
@@ -134,6 +167,17 @@ Apply rounding and return updated SVG.
 
 ### `POST /api/process`
 Compatibility route for existing frontend behavior.
+
+### `DELETE /api/cache`
+Clears analyze cache entries.
+
+Request guards:
+- allowed content types: `image/svg+xml`, `multipart/form-data`, `application/json`
+- empty input: `400 {"ok": false, "error": "empty_input"}`
+- oversized input: `413 {"ok": false, "error": "file_too_large"}`
+- malformed SVG parse failure: `422 {"ok": false, "error": "parse_error: ..."}`
+
+Analyze responses include `X-Cache: MISS` for fresh compute and `X-Cache: HIT` for cached results.
 
 Common response shape:
 
@@ -173,19 +217,22 @@ Common response shape:
 1. Upload SVG
 2. Click **Finalize SVG** (single click runs detect + arc preview + finalize round)
 3. Watch optimization progress animation while processing
-4. Download finalized SVG
+4. Optionally override per-corner radius values, use per-row **Reset** or **Reset all overrides**
+5. Click **Finalize SVG** again to apply overrides
+6. Download finalized SVG
 
 Notes:
 - Frontend is intentionally minimal for production flow.
 - Advanced tuning remains available via CLI/API options.
+- If backend is unreachable, a top-level offline state is shown: "Backend offline — make sure the Flask server is running on port 5050."
 
 ## Tests
 
 ```bash
-pytest -q
+py -m pytest -q
 ```
 
-Test coverage includes parser behavior, tangents, detection, radius profiles, fillet validation, and round pipeline parse-validity.
+Current suite includes API integration, parser behavior, tangents, detection, radius profiles, fillet validation, adjacency handling, legacy runtime coverage, and round pipeline parse-validity.
 
 ## Screenshots
 

@@ -40,22 +40,33 @@ export default function App() {
     processedSvgText,
     summary,
     diagnostics,
+    corners,
+    cornerOverrides,
     loading,
     error,
+    fatalError,
     pipelineStage,
     stageProgress,
+    showAnalyzeDelayMessage,
     selectFile,
     runFinalizePipeline,
     downloadProcessedSvg,
+    updateCornerOverride,
+    resetCornerOverride,
+    resetAllOverrides,
     loadingMode,
   } = useSvgProcessor()
 
   const [showInputViewer, setShowInputViewer] = useState(false)
+  if (fatalError) {
+    throw fatalError
+  }
 
   const inputViewerMarkup = useMemo(() => sanitizeSvg(originalSvgText), [originalSvgText])
   const previewResetToken = inputFile ? `${inputFile.name}:${inputFile.lastModified}` : 'none'
   const previewSvg = processedSvgText || originalSvgText
   const currentStageIndex = STAGE_INDEX[pipelineStage] ?? -1
+  const hasOverrides = Object.keys(cornerOverrides).length > 0
 
   return (
     <div className="app-shell">
@@ -137,6 +148,71 @@ export default function App() {
               <p className="warning-text">{diagnostics.warnings[0]}</p>
             ) : null}
             {error ? <p className="error-text">{error}</p> : null}
+            {loading ? (
+              <div className="loading-inline" role="status" aria-live="polite">
+                <span className="loading-spinner" />
+                <span>Processing SVG...</span>
+              </div>
+            ) : null}
+            {loading && pipelineStage === 'analyze' && showAnalyzeDelayMessage ? (
+              <p className="loading-note">Analyzing... this may take a moment for large files</p>
+            ) : null}
+          </section>
+
+          <section className="simple-card override-card">
+            <div className="override-head">
+              <h2>Corner Radius Overrides</h2>
+              {hasOverrides ? (
+                <button className="ghost-btn tiny-btn" onClick={resetAllOverrides}>
+                  Reset all overrides
+                </button>
+              ) : null}
+            </div>
+
+            {corners.length === 0 ? (
+              <p className="muted-text">Run Finalize SVG once to load detected corners.</p>
+            ) : (
+              <div className="override-table-wrap">
+                <table className="override-table">
+                  <thead>
+                    <tr>
+                      <th>Corner</th>
+                      <th>Suggested</th>
+                      <th>Override</th>
+                      <th>Reset</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {corners.map((corner) => {
+                      const key = `${corner.path_id}:${corner.node_id}`
+                      const hasValue = Object.prototype.hasOwnProperty.call(cornerOverrides, key)
+                      return (
+                        <tr key={key}>
+                          <td>{key}</td>
+                          <td>{Number(corner.suggested_radius || 0).toFixed(2)}</td>
+                          <td>
+                            <input
+                              type="number"
+                              step="0.1"
+                              min="0"
+                              value={hasValue ? cornerOverrides[key] : ''}
+                              onChange={(event) => updateCornerOverride(key, event.target.value)}
+                            />
+                          </td>
+                          <td>
+                            {hasValue ? (
+                              <button className="ghost-btn tiny-btn" onClick={() => resetCornerOverride(key)}>
+                                Reset
+                              </button>
+                            ) : null}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         </aside>
 

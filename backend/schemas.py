@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, NotRequired, TypedDict
+
+from svg_corner_smooth.constants import MIN_FILLET_RADIUS
 
 from svg_corner_smooth.utils import parse_bool, parse_float, parse_int
 from svg_corner_smooth.validate import build_options
+
+
+class ApiResponseSchema(TypedDict, total=False):
+    """Top-level API response shape for analyze/round/process endpoints."""
+
+    ok: bool
+    error: NotRequired[str]
+    summary: NotRequired[dict[str, Any]]
+    corners: NotRequired[list[dict[str, Any]]]
+    rejected_corners: NotRequired[list[dict[str, Any]]]
+    diagnostics: NotRequired[dict[str, Any]]
+    svg: NotRequired[str]
 
 
 def _value(data: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
@@ -69,8 +83,11 @@ def parse_options_from_mapping(data: Mapping[str, Any]) -> Any:
             10,
         ),
         min_allowed_radius=parse_float(
-            _as_text(_value(data, "minAllowedRadius", "min_allowed_radius", default="0.25"), "0.25"),
-            0.25,
+            _as_text(
+                _value(data, "minAllowedRadius", "min_allowed_radius", default=str(MIN_FILLET_RADIUS)),
+                str(MIN_FILLET_RADIUS),
+            ),
+            MIN_FILLET_RADIUS,
         ),
         skip_invalid_corners=skip_invalid,
         exact_curve_trim=exact_curve_trim,

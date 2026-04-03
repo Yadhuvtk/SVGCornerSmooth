@@ -11,7 +11,7 @@ const FINALIZE_PARAMS = Object.freeze({
   detectionMode: 'accurate',
   radiusProfile: 'adaptive',
   maxRadiusShrinkIterations: 10,
-  minAllowedRadius: 0.25,
+  minAllowedRadius: 0.5,
   intersectionSafetyMargin: 0.01,
   skipInvalidCorners: true,
   exactCurveTrim: true,
@@ -52,6 +52,11 @@ function normalizeStage(stage) {
   return stage === 'idle' ? 'analyze' : stage
 }
 
+function isBackendOfflineError(err) {
+  const message = err instanceof Error ? err.message : String(err || '')
+  return message.includes('Cannot reach SVGCornerSmooth backend')
+}
+
 export function useSvgProcessor() {
   const [inputFile, setInputFile] = useState(null)
   const [originalSvgText, setOriginalSvgText] = useState('')
@@ -59,10 +64,13 @@ export function useSvgProcessor() {
   const [summary, setSummary] = useState(null)
   const [diagnostics, setDiagnostics] = useState(null)
   const [corners, setCorners] = useState([])
+  const [cornerOverrides, setCornerOverrides] = useState({})
   const [arcPreview, setArcPreview] = useState([])
   const [pipelineStage, setPipelineStage] = useState('idle')
   const [loading, setLoading] = useState(false)
+  const [showAnalyzeDelayMessage, setShowAnalyzeDelayMessage] = useState(false)
   const [error, setError] = useState('')
+  const [fatalError, setFatalError] = useState(null)
 
   const abortRef = useRef(null)
 
@@ -72,10 +80,14 @@ export function useSvgProcessor() {
       .then(() => {
         if (controller.signal.aborted) return
         setError('')
+        setFatalError(null)
       })
       .catch((err) => {
         if (controller.signal.aborted) return
         setError(err instanceof Error ? err.message : 'Failed to connect backend.')
+        if (isBackendOfflineError(err)) {
+          setFatalError(new Error('backend_offline'))
+        }
       })
     return () => {
       controller.abort()
@@ -91,8 +103,10 @@ export function useSvgProcessor() {
     setSummary(null)
     setDiagnostics(null)
     setCorners([])
+    setCornerOverrides({})
     setArcPreview([])
     setPipelineStage('idle')
+    setShowAnalyzeDelayMessage(false)
 
     if (!file) {
       setInputFile(null)
@@ -133,6 +147,12 @@ export function useSvgProcessor() {
 
     setLoading(true)
     setError('')
+    setShowAnalyzeDelayMessage(false)
+    const analyzeDelayTimer = setTimeout(() => {
+      if (!controller.signal.aborted) {
+        setShowAnalyzeDelayMessage(true)
+      }
+    }, 2000)
 
     try {
       setPipelineStage('analyze')
@@ -142,6 +162,8 @@ export function useSvgProcessor() {
         signal: controller.signal,
       })
       if (controller.signal.aborted) return
+      clearTimeout(analyzeDelayTimer)
+      setShowAnalyzeDelayMessage(false)
       applyPayload(analyzePayload)
 
       setPipelineStage('preview')
@@ -157,7 +179,11 @@ export function useSvgProcessor() {
       setPipelineStage('round')
       const roundedPayload = await roundSvg({
         file: inputFile,
-        params: requestParamsForMode('round'),
+        params: {
+          ...requestParamsForMode('round'),
+          cornerRadiusOverridesJson:
+            Object.keys(cornerOverrides).length > 0 ? JSON.stringify(cornerOverrides) : undefined,
+        },
         signal: controller.signal,
       })
       if (controller.signal.aborted) return
@@ -166,14 +192,53 @@ export function useSvgProcessor() {
       setPipelineStage('done')
     } catch (err) {
       if (controller.signal.aborted) return
+      clearTimeout(analyzeDelayTimer)
+      setShowAnalyzeDelayMessage(false)
       setError(err instanceof Error ? err.message : 'Failed to process SVG.')
+      if (isBackendOfflineError(err)) {
+        setFatalError(new Error('backend_offline'))
+      }
       setPipelineStage('idle')
     } finally {
+      clearTimeout(analyzeDelayTimer)
+      setShowAnalyzeDelayMessage(false)
       if (!controller.signal.aborted) {
         setLoading(false)
       }
     }
-  }, [applyPayload, inputFile])
+  }, [applyPayload, cornerOverrides, inputFile])
+
+  const updateCornerOverride = useCallback((key, rawValue) => {
+    const text = String(rawValue ?? '').trim()
+    if (!text) {
+      setCornerOverrides((prev) => {
+        if (!(key in prev)) return prev
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
+      return
+    }
+
+    const radius = Number(text)
+    if (!Number.isFinite(radius) || radius <= 0) {
+      return
+    }
+    setCornerOverrides((prev) => ({ ...prev, [key]: radius }))
+  }, [])
+
+  const resetCornerOverride = useCallback((key) => {
+    setCornerOverrides((prev) => {
+      if (!(key in prev)) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }, [])
+
+  const resetAllOverrides = useCallback(() => {
+    setCornerOverrides({})
+  }, [])
 
   const downloadProcessedSvg = useCallback(() => {
     if (!processedSvgText) return
@@ -200,11 +265,17 @@ export function useSvgProcessor() {
     arcPreview,
     pipelineStage,
     loading,
+    showAnalyzeDelayMessage,
     error,
+    fatalError,
     stageProgress,
+    cornerOverrides,
     selectFile,
     runFinalizePipeline,
     downloadProcessedSvg,
+    updateCornerOverride,
+    resetCornerOverride,
+    resetAllOverrides,
     loadingMode: normalizeStage(pipelineStage),
   }
 }

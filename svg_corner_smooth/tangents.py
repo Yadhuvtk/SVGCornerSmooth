@@ -6,7 +6,20 @@ from typing import Optional
 
 from svgpathtools import Arc, CubicBezier, Line, QuadraticBezier
 
-from .utils import clamp, normalize_vector
+from .utils import clamp
+
+_MIN_TANGENT_MAG = 1e-9
+
+
+def safe_normalize(vec: complex, fallback: complex = (1 + 0j)) -> complex:
+    """Normalize vector safely, using normalized fallback for tiny vectors."""
+    magnitude = abs(vec)
+    if magnitude < _MIN_TANGENT_MAG:
+        fallback_magnitude = abs(fallback)
+        if fallback_magnitude < _MIN_TANGENT_MAG:
+            return 1 + 0j
+        return fallback / fallback_magnitude
+    return vec / magnitude
 
 
 def sample_endpoint_vector(segment: object, at_end: bool, step: float) -> complex:
@@ -20,7 +33,10 @@ def sample_endpoint_vector(segment: object, at_end: bool, step: float) -> comple
 def estimate_endpoint_tangent(segment: object, at_end: bool, samples_per_curve: int) -> Optional[complex]:
     """Estimate stable tangent direction at a segment endpoint."""
     if isinstance(segment, Line):
-        return normalize_vector(segment.end - segment.start)
+        direction = complex(segment.end - segment.start)
+        if abs(direction) < _MIN_TANGENT_MAG:
+            return None
+        return safe_normalize(direction)
 
     candidates: list[complex] = []
     derivative_t = 1.0 if at_end else 0.0
@@ -35,14 +51,17 @@ def estimate_endpoint_tangent(segment: object, at_end: bool, samples_per_curve: 
     base_step = 1.0 / max(2, samples_per_curve)
     for factor in (1.0, 2.0, 4.0, 8.0):
         try:
-            candidates.append(sample_endpoint_vector(segment, at_end=at_end, step=base_step * factor))
+            candidate = sample_endpoint_vector(segment, at_end=at_end, step=base_step * factor)
+            if abs(candidate) < _MIN_TANGENT_MAG:
+                continue
+            candidates.append(candidate)
         except Exception:
             continue
 
     for vector in candidates:
-        normalized = normalize_vector(vector)
-        if normalized is not None:
-            return normalized
+        if abs(vector) < _MIN_TANGENT_MAG:
+            continue
+        return safe_normalize(vector)
 
     return None
 
@@ -53,9 +72,8 @@ def estimate_tangent_at_t(segment: object, t_value: float, samples_per_curve: in
 
     try:
         derivative = complex(segment.derivative(t_value))
-        normalized = normalize_vector(derivative)
-        if normalized is not None:
-            return normalized
+        if abs(derivative) >= _MIN_TANGENT_MAG:
+            return safe_normalize(derivative)
     except Exception:
         pass
 
@@ -66,6 +84,9 @@ def estimate_tangent_at_t(segment: object, t_value: float, samples_per_curve: in
         return None
 
     try:
-        return normalize_vector(complex(segment.point(t1) - segment.point(t0)))
+        sampled = complex(segment.point(t1) - segment.point(t0))
+        if abs(sampled) < _MIN_TANGENT_MAG:
+            return None
+        return safe_normalize(sampled)
     except Exception:
         return None

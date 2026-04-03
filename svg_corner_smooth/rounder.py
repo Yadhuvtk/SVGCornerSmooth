@@ -1,4 +1,4 @@
-﻿"""High-level analyze/round orchestration for SVG corner processing."""
+"""High-level analyze/round orchestration for SVG corner processing."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ import time
 from collections import defaultdict
 from typing import Any
 
-from . import _legacy
+from . import legacy_runtime as _legacy
 from .detect import detect_corners
 from .fillet import FilletSettings, shrink_radius_until_valid
 from .models import CornerSeverity, DiagnosticsReport, ProcessingOptions, ProcessingResult, ProcessingSummary, RejectedCorner
 from .overlay import apply_overlay
-from .parser import parse_svg_document, write_path_back_to_element
+from .parser import build_adjacency_graph, parse_svg_document, write_path_back_to_element
 from .radius_profiles import RadiusContext, compute_corner_radius
 from .validate import validate_processing_options
 
@@ -107,6 +107,93 @@ def _to_svg_text(tree: Any) -> str:
     return output.getvalue().decode("utf-8")
 
 
+def _find_corner_near_shared_point(
+    corners: list[CornerSeverity],
+    path_id: int,
+    shared_point: complex,
+    tolerance: float,
+) -> CornerSeverity | None:
+    best: CornerSeverity | None = None
+    best_distance = float("inf")
+    for corner in corners:
+        if corner.path_id != path_id:
+            continue
+        distance = abs(complex(corner.x, corner.y) - shared_point)
+        if distance > tolerance:
+            continue
+        if distance < best_distance:
+            best = corner
+            best_distance = distance
+    return best
+
+
+def _apply_adjacency_constraints(
+    corners: list[CornerSeverity],
+    radius_map: dict[str, float],
+    paths: list[Any],
+    diagnostics: DiagnosticsReport,
+    tolerance: float = 0.5,
+) -> list[dict[str, float]]:
+    """Constrain shared-endpoint corners to the same radius across adjacent paths."""
+    graph = build_adjacency_graph(paths, tolerance=tolerance)
+    adjacency_payload: list[dict[str, float]] = []
+    seen_edges: set[tuple[int, int, int, int]] = set()
+
+    for path_a, neighbors in graph.adjacency.items():
+        for path_b, shared_point in neighbors:
+            if path_a == path_b:
+                continue
+
+            lo, hi = sorted((path_a, path_b))
+            edge_key = (
+                lo,
+                hi,
+                int(round(shared_point.real * 10)),
+                int(round(shared_point.imag * 10)),
+            )
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+
+            corner_a = _find_corner_near_shared_point(corners, path_a, shared_point, tolerance=tolerance)
+            corner_b = _find_corner_near_shared_point(corners, path_b, shared_point, tolerance=tolerance)
+            if corner_a is None or corner_b is None:
+                continue
+
+            key_a = _key(corner_a.path_id, corner_a.node_id)
+            key_b = _key(corner_b.path_id, corner_b.node_id)
+            radius_a = radius_map.get(key_a, 0.0)
+            radius_b = radius_map.get(key_b, 0.0)
+            constrained = min(radius_a, radius_b)
+
+            if constrained > 0.0:
+                radius_map[key_a] = constrained
+                radius_map[key_b] = constrained
+                corner_a.suggested_radius = constrained
+                corner_b.suggested_radius = constrained
+                note = (
+                    f"constrained by adjacency with {key_b} at "
+                    f"({shared_point.real:.3f},{shared_point.imag:.3f})"
+                )
+                diagnostics.warnings.append(f"corner {key_a} {note}")
+                corner_a.diagnostic_notes.append(note)
+                corner_b.diagnostic_notes.append(
+                    f"constrained by adjacency with {key_a} at "
+                    f"({shared_point.real:.3f},{shared_point.imag:.3f})"
+                )
+
+            adjacency_payload.append(
+                {
+                    "path_a": int(path_a),
+                    "path_b": int(path_b),
+                    "shared_point_x": float(shared_point.real),
+                    "shared_point_y": float(shared_point.imag),
+                }
+            )
+
+    return adjacency_payload
+
+
 def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> ProcessingResult:
     """Process a parsed SVG document and return corner diagnostics + output SVG."""
     validate_processing_options(options)
@@ -129,6 +216,7 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
             summary=summary,
             diagnostics=diagnostics,
             arc_preview=[],
+            adjacency=[],
         )
 
     severity_corners: list[CornerSeverity] = []
@@ -160,6 +248,12 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
 
     summary.corners_found = len(severity_corners)
     radius_map = _compute_radius_map(severity_corners, options)
+    adjacency_payload = _apply_adjacency_constraints(
+        corners=severity_corners,
+        radius_map=radius_map,
+        paths=[entry.path for entry in parsed_doc.entries],
+        diagnostics=diagnostics,
+    )
 
     rounded_count = 0
     skipped_count = 0
@@ -269,6 +363,7 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
         summary=summary,
         diagnostics=diagnostics,
         arc_preview=arc_preview,
+        adjacency=adjacency_payload,
     )
 
 

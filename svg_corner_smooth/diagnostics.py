@@ -23,6 +23,7 @@ def corner_to_dict(corner: CornerSeverity) -> dict[str, Any]:
         "risk_score": round(corner.risk_score, 4),
         "join_type": corner.join_type,
         "suggested_radius": round(corner.suggested_radius, 4),
+        "diagnostic_notes": list(corner.diagnostic_notes),
     }
 
 

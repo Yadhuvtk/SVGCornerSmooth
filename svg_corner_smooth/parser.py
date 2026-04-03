@@ -8,7 +8,7 @@ from typing import Iterable, Optional
 
 from svgpathtools import Path, parse_path
 
-from .models import ParsedPathEntry, ParsedSvgDocument
+from .models import ParsedPathEntry, ParsedSvgDocument, PathAdjacencyGraph
 from .utils import matrix_multiply, parse_transform, transform_path
 
 
@@ -150,7 +150,7 @@ def _iter_supported_elements(
         yield from _iter_supported_elements(child, own_matrix)
 
 
-def parse_svg_document(source: str | bytes | ET.ElementTree, debug: bool = False) -> ParsedSvgDocument:
+def parse_svg_document(source: str | bytes | ET.ElementTree, debug: bool = False, strict: bool = False) -> ParsedSvgDocument:
     """Parse SVG XML source and return normalized path entries."""
     if isinstance(source, ET.ElementTree):
         tree = source
@@ -176,7 +176,9 @@ def parse_svg_document(source: str | bytes | ET.ElementTree, debug: bool = False
             continue
         try:
             path = parse_path(path_data)
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise ValueError(f"svg_parse_error at {local_tag} path_id={path_id}: {exc}") from exc
             if debug:
                 print(f"[debug] Could not parse {local_tag} element path data.")
             continue
@@ -195,6 +197,64 @@ def parse_svg_document(source: str | bytes | ET.ElementTree, debug: bool = False
         path_id += 1
 
     return ParsedSvgDocument(tree=tree, root=root, namespace=namespace, entries=entries)
+
+
+def _bucket_key(point: complex, tolerance: float) -> tuple[int, int]:
+    return (int(round(point.real / tolerance)), int(round(point.imag / tolerance)))
+
+
+def _path_endpoints(path: Path) -> list[complex]:
+    if len(path) == 0:
+        return []
+    endpoints: list[complex] = []
+    for segment in path:
+        endpoints.append(complex(segment.start))
+        endpoints.append(complex(segment.end))
+    return endpoints
+
+
+def build_adjacency_graph(paths: list[Path], tolerance: float = 0.5) -> PathAdjacencyGraph:
+    """
+    For each endpoint of each path, detect neighboring path endpoints within tolerance.
+    Uses a coarse spatial bucket index for near O(n) lookup.
+    """
+    if tolerance <= 0:
+        raise ValueError("tolerance must be > 0")
+
+    buckets: dict[tuple[int, int], list[tuple[int, complex]]] = {}
+    for path_index, path in enumerate(paths):
+        for point in _path_endpoints(path):
+            key = _bucket_key(point, tolerance)
+            buckets.setdefault(key, []).append((path_index, point))
+
+    adjacency: dict[int, list[tuple[int, complex]]] = {index: [] for index in range(len(paths))}
+    seen_pairs: set[tuple[int, int, int, int]] = set()
+
+    for key, entries in buckets.items():
+        # Include neighboring buckets to handle boundary cases near bucket edges.
+        neighborhood: list[tuple[int, complex]] = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                neighborhood.extend(buckets.get((key[0] + dx, key[1] + dy), []))
+
+        for path_a, point_a in entries:
+            for path_b, point_b in neighborhood:
+                if path_a == path_b:
+                    continue
+                if abs(point_a - point_b) > tolerance:
+                    continue
+
+                lo, hi = sorted((path_a, path_b))
+                shared_point = complex((point_a.real + point_b.real) * 0.5, (point_a.imag + point_b.imag) * 0.5)
+                pair_key = (lo, hi, *_bucket_key(shared_point, tolerance))
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+
+                adjacency[path_a].append((path_b, shared_point))
+                adjacency[path_b].append((path_a, shared_point))
+
+    return PathAdjacencyGraph(adjacency=adjacency)
 
 
 def write_path_back_to_element(entry: ParsedPathEntry, new_path: Path, namespace: str) -> None:

@@ -21,7 +21,7 @@ async function sendSvgRequest(path, { file, params, signal }) {
       body: form,
       signal,
     })
-  } catch (error) {
+  } catch {
     throw new Error('Cannot reach SVGCornerSmooth backend. Start `python api_server.py` (default: 127.0.0.1:5050).')
   }
 
@@ -52,7 +52,7 @@ export async function fetchProfiles(signal) {
   let response
   try {
     response = await fetch(endpoint('/api/profiles'), { signal })
-  } catch (error) {
+  } catch {
     throw new Error('Cannot reach SVGCornerSmooth backend. Start `python api_server.py` (default: 127.0.0.1:5050).')
   }
   const payload = await response.json().catch(() => ({}))

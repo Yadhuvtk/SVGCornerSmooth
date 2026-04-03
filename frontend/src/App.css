@@ -312,6 +312,116 @@
   font-size: 0.78rem;
 }
 
+.loading-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #d5e7ff;
+  font-size: 0.76rem;
+}
+
+.loading-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(126, 197, 255, 0.35);
+  border-top-color: #58c4ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.loading-note {
+  margin: 0;
+  color: #c8dcff;
+  font-size: 0.75rem;
+}
+
+.override-card {
+  min-height: 0;
+}
+
+.override-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.override-table-wrap {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid rgba(86, 124, 167, 0.5);
+  border-radius: 10px;
+}
+
+.override-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.74rem;
+}
+
+.override-table th,
+.override-table td {
+  border-bottom: 1px solid rgba(86, 124, 167, 0.45);
+  padding: 8px 7px;
+  text-align: left;
+}
+
+.override-table th {
+  background: rgba(15, 32, 54, 0.9);
+  color: #bad3f5;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.override-table tbody tr:hover {
+  background: rgba(38, 70, 107, 0.25);
+}
+
+.override-table input {
+  width: 84px;
+  border-radius: 7px;
+  border: 1px solid #40638d;
+  background: #0f2340;
+  color: #e6f2ff;
+  padding: 5px 7px;
+}
+
+.tiny-btn {
+  padding: 6px 9px;
+  font-size: 0.72rem;
+}
+
+.muted-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.offline-fallback {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: #eaf3ff;
+  padding: 24px;
+  background:
+    radial-gradient(900px 640px at -10% -20%, rgba(35, 114, 196, 0.24), transparent 60%),
+    radial-gradient(900px 660px at 115% -15%, rgba(38, 184, 224, 0.2), transparent 60%),
+    linear-gradient(160deg, #050d18 0%, #081426 52%, #06111f 100%);
+}
+
+.offline-fallback h1 {
+  margin: 0;
+  font-size: clamp(1.4rem, 1.15rem + 1vw, 2rem);
+}
+
+.offline-fallback p {
+  margin: 10px 0 0;
+  color: #bdd5f7;
+  max-width: 520px;
+}
+
 .preview-wrap {
   min-height: 0;
   display: flex;
@@ -580,6 +690,12 @@
   }
   100% {
     transform: translateX(150%);
+  }
+}
+
+@keyframes spin {
+  100% {
+    transform: rotate(360deg);
   }
 }
 

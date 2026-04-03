@@ -1,4 +1,4 @@
-﻿"""Command-line interface for SVG corner detection and corner rounding."""
+"""Command-line interface for SVG corner detection and corner rounding."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 import sys
 from types import SimpleNamespace
 
-from . import _legacy
+from . import legacy_runtime as _legacy
 from .diagnostics import print_corner_table
 from .rounder import process_svg
 from .validate import build_options, validate_processing_options

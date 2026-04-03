@@ -1,18 +1,35 @@
-﻿"""Flask application for SVG corner analysis and rounding."""
+"""Flask application for SVG corner analysis and rounding."""
 
 from __future__ import annotations
 
+import hashlib
+from collections import OrderedDict
 from typing import Any
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from svg_corner_smooth.constants import SUPPORTED_DETECTION_MODES, SUPPORTED_EXPORT_MODES, SUPPORTED_RADIUS_PROFILES
 from svg_corner_smooth.diagnostics import corner_to_dict, diagnostics_to_dict, rejected_to_dict, summary_to_dict
+from svg_corner_smooth.parser import parse_svg_document
 from svg_corner_smooth.rounder import analyze_svg, process_svg, round_svg
 from svg_corner_smooth.validate import validate_processing_options, validate_svg_bytes
 
 from .config import BackendConfig
 from .schemas import parse_options_from_mapping
+
+_ALLOWED_CONTENT_TYPES = ("multipart/form-data", "application/json", "image/svg+xml")
+_ANALYZE_CACHE_MAX = 32
+_ANALYZE_CACHE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+
+
+class ApiError(Exception):
+    """Structured API error with HTTP status."""
+
+    def __init__(self, error: str, status_code: int) -> None:
+        super().__init__(error)
+        self.error = error
+        self.status_code = status_code
 
 
 def _build_response(result: Any) -> dict[str, Any]:
@@ -37,8 +54,20 @@ def _build_response(result: Any) -> dict[str, Any]:
         "mode": diagnostics_payload["export_mode"],
         "radiusProfile": diagnostics_payload["radius_profile"],
         "arcCircles": result.arc_preview,
+        "adjacency": result.adjacency,
     }
     return response
+
+
+def _error_response(error: str, status_code: int) -> tuple[Response, int]:
+    return jsonify({"ok": False, "error": error}), status_code
+
+
+def _ensure_supported_content_type() -> None:
+    content_type = (request.content_type or "").lower()
+    if any(content_type.startswith(prefix) for prefix in _ALLOWED_CONTENT_TYPES):
+        return
+    raise ApiError("unsupported_content_type", 415)
 
 
 def _extract_svg_bytes() -> bytes:
@@ -46,30 +75,70 @@ def _extract_svg_bytes() -> bytes:
         upload = request.files["file"]
         return upload.read()
 
+    content_type = (request.content_type or "").lower()
+    if content_type.startswith("image/svg+xml"):
+        return request.get_data(cache=False) or b""
+
     payload = request.get_json(silent=True) or {}
     svg_text = payload.get("svg")
-    if isinstance(svg_text, str) and svg_text.strip():
+    if isinstance(svg_text, str):
         return svg_text.encode("utf-8")
 
-    raise ValueError("Missing SVG input. Send multipart field 'file' or JSON {svg: ...}")
+    return b""
+
+
+def _validate_svg_payload(svg_bytes: bytes, cfg: BackendConfig) -> None:
+    if len(svg_bytes) == 0:
+        raise ApiError("empty_input", 400)
+    if len(svg_bytes) > cfg.MAX_SVG_BYTES:
+        raise ApiError("file_too_large", 413)
+
+    try:
+        validate_svg_bytes(svg_bytes, cfg.MAX_SVG_BYTES)
+        # strict=True ensures malformed path data raises instead of being silently skipped.
+        parse_svg_document(svg_bytes, strict=True)
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(f"parse_error: {exc}", 422) from exc
+
+
+def _analyze_cache_get(key: str) -> dict[str, Any] | None:
+    payload = _ANALYZE_CACHE.get(key)
+    if payload is None:
+        return None
+    _ANALYZE_CACHE.move_to_end(key)
+    return payload
+
+
+def _analyze_cache_put(key: str, payload: dict[str, Any]) -> None:
+    _ANALYZE_CACHE[key] = payload
+    _ANALYZE_CACHE.move_to_end(key)
+    while len(_ANALYZE_CACHE) > _ANALYZE_CACHE_MAX:
+        _ANALYZE_CACHE.popitem(last=False)
+
+
+def _cache_key_for_svg(svg_bytes: bytes) -> str:
+    return hashlib.sha256(svg_bytes).hexdigest()
 
 
 def create_app(config: BackendConfig | None = None) -> Flask:
     """Application factory."""
     cfg = config or BackendConfig.from_env()
     app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = cfg.max_upload_bytes
+    app.config["MAX_CONTENT_LENGTH"] = cfg.MAX_SVG_BYTES
+    _ANALYZE_CACHE.clear()
 
     @app.after_request
     def add_cors_headers(response):  # type: ignore[no-untyped-def]
         response.headers["Access-Control-Allow-Origin"] = cfg.cors_origin
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,DELETE,OPTIONS"
         return response
 
     @app.get("/api/health")
     def health() -> Any:
-        return jsonify({"ok": True, "max_upload_mb": cfg.max_upload_mb})
+        return jsonify({"ok": True, "max_upload_mb": round(cfg.max_upload_mb, 3)})
 
     @app.get("/api/profiles")
     def profiles() -> Any:
@@ -85,14 +154,21 @@ def create_app(config: BackendConfig | None = None) -> Flask:
     @app.route("/api/process", methods=["OPTIONS"])
     @app.route("/api/analyze", methods=["OPTIONS"])
     @app.route("/api/round", methods=["OPTIONS"])
+    @app.route("/api/cache", methods=["OPTIONS"])
     def options_preflight() -> Any:
         return ("", 204)
+
+    @app.delete("/api/cache")
+    def clear_cache_route() -> Any:
+        _ANALYZE_CACHE.clear()
+        return jsonify({"ok": True, "error": None, "cleared": True})
 
     @app.post("/api/analyze")
     def analyze_route() -> Any:
         try:
+            _ensure_supported_content_type()
             svg_bytes = _extract_svg_bytes()
-            validate_svg_bytes(svg_bytes, cfg.max_upload_bytes)
+            _validate_svg_payload(svg_bytes, cfg)
 
             data = request.form if request.form else (request.get_json(silent=True) or {})
             options = parse_options_from_mapping(data)
@@ -101,18 +177,35 @@ def create_app(config: BackendConfig | None = None) -> Flask:
                 options.export_mode = "diagnostics_overlay"
 
             validate_processing_options(options)
+
+            cache_key = _cache_key_for_svg(svg_bytes)
+            cached_payload = _analyze_cache_get(cache_key)
+            if cached_payload is not None:
+                response = jsonify(cached_payload)
+                response.headers["X-Cache"] = "HIT"
+                return response
+
             result = analyze_svg(svg_bytes, options)
-            return jsonify(_build_response(result))
+            payload = _build_response(result)
+            _analyze_cache_put(cache_key, payload)
+            response = jsonify(payload)
+            response.headers["X-Cache"] = "MISS"
+            return response
+        except ApiError as exc:
+            return _error_response(exc.error, exc.status_code)
+        except RequestEntityTooLarge:
+            return _error_response("file_too_large", 413)
         except ValueError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 400
+            return _error_response(str(exc), 400)
         except Exception as exc:
-            return jsonify({"ok": False, "error": f"Unexpected server failure: {exc}"}), 500
+            return _error_response(f"Unexpected server failure: {exc}", 500)
 
     @app.post("/api/round")
     def round_route() -> Any:
         try:
+            _ensure_supported_content_type()
             svg_bytes = _extract_svg_bytes()
-            validate_svg_bytes(svg_bytes, cfg.max_upload_bytes)
+            _validate_svg_payload(svg_bytes, cfg)
 
             data = request.form if request.form else (request.get_json(silent=True) or {})
             options = parse_options_from_mapping(data)
@@ -122,17 +215,22 @@ def create_app(config: BackendConfig | None = None) -> Flask:
             validate_processing_options(options)
             result = round_svg(svg_bytes, options)
             return jsonify(_build_response(result))
+        except ApiError as exc:
+            return _error_response(exc.error, exc.status_code)
+        except RequestEntityTooLarge:
+            return _error_response("file_too_large", 413)
         except ValueError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 400
+            return _error_response(str(exc), 400)
         except Exception as exc:
-            return jsonify({"ok": False, "error": f"Unexpected server failure: {exc}"}), 500
+            return _error_response(f"Unexpected server failure: {exc}", 500)
 
     @app.post("/api/process")
     def process_route() -> Any:
         """Compatibility route preserving existing frontend contract."""
         try:
+            _ensure_supported_content_type()
             svg_bytes = _extract_svg_bytes()
-            validate_svg_bytes(svg_bytes, cfg.max_upload_bytes)
+            _validate_svg_payload(svg_bytes, cfg)
 
             data = request.form if request.form else (request.get_json(silent=True) or {})
             options = parse_options_from_mapping(data)
@@ -140,9 +238,13 @@ def create_app(config: BackendConfig | None = None) -> Flask:
 
             result = process_svg(svg_bytes, options)
             return jsonify(_build_response(result))
+        except ApiError as exc:
+            return _error_response(exc.error, exc.status_code)
+        except RequestEntityTooLarge:
+            return _error_response("file_too_large", 413)
         except ValueError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 400
+            return _error_response(str(exc), 400)
         except Exception as exc:
-            return jsonify({"ok": False, "error": f"Unexpected server failure: {exc}"}), 500
+            return _error_response(f"Unexpected server failure: {exc}", 500)
 
     return app

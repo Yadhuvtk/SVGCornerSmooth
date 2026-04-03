@@ -1,4 +1,4 @@
-﻿"""Overlay rendering helpers for markers, previews, and diagnostics layers."""
+"""Overlay rendering helpers for markers, previews, and diagnostics layers."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, Optional
 from .models import CornerSeverity, DiagnosticsReport
 from .parser import svg_tag
 
-from . import _legacy
+from . import legacy_runtime as _legacy
 
 
 def _severity_color(score: float) -> str:

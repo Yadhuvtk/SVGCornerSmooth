@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .constants import MIN_FILLET_RADIUS
+
 
 @dataclass
 class CornerSeverity:
@@ -23,6 +25,7 @@ class CornerSeverity:
     risk_score: float
     join_type: str
     suggested_radius: float = 0.0
+    diagnostic_notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -37,13 +40,27 @@ class RejectedCorner:
 
 
 @dataclass
-class FilletValidationResult:
-    """Validation result for a proposed fillet."""
+class FilletResult:
+    """Result for a fillet attempt, including skip/shrink diagnostics."""
 
-    valid: bool
+    status: str  # "ok", "skipped", "shrunk"
     reason: str
-    radius: float
+    corner: Any | None
+    attempted_radius: float
+    final_radius: float
     iterations: int
+
+    @property
+    def valid(self) -> bool:
+        return self.status in {"ok", "shrunk"}
+
+    @property
+    def radius(self) -> float:
+        return self.final_radius
+
+
+# Backward compatibility alias used across current code/tests.
+FilletValidationResult = FilletResult
 
 
 @dataclass
@@ -84,7 +101,7 @@ class ProcessingOptions:
     preview_only: bool
     debug: bool
     max_radius_shrink_iterations: int = 10
-    min_allowed_radius: float = 0.25
+    min_allowed_radius: float = MIN_FILLET_RADIUS
     skip_invalid_corners: bool = True
     exact_curve_trim: bool = True
     intersection_safety_margin: float = 0.01
@@ -112,6 +129,14 @@ class ParsedSvgDocument:
 
 
 @dataclass
+class PathAdjacencyGraph:
+    """Adjacency relationships between path endpoints."""
+
+    # maps path_index -> list of (neighbor_path_index, shared_point)
+    adjacency: dict[int, list[tuple[int, complex]]]
+
+
+@dataclass
 class ProcessingResult:
     """Final process result returned by rounder and backend endpoints."""
 
@@ -120,3 +145,4 @@ class ProcessingResult:
     summary: ProcessingSummary
     diagnostics: DiagnosticsReport
     arc_preview: list[dict[str, float]] = field(default_factory=list)
+    adjacency: list[dict[str, float]] = field(default_factory=list)

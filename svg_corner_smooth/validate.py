@@ -13,6 +13,7 @@ from .constants import (
     DEFAULT_MIN_SEGMENT_LENGTH,
     DEFAULT_RADIUS_PROFILE,
     DEFAULT_SAMPLES_PER_CURVE,
+    MIN_FILLET_RADIUS,
     SUPPORTED_DETECTION_MODES,
     SUPPORTED_EXPORT_MODES,
     SUPPORTED_RADIUS_PROFILES,
@@ -65,7 +66,7 @@ def build_options(
     preview_only: bool = False,
     debug: bool = False,
     max_radius_shrink_iterations: int = 10,
-    min_allowed_radius: float = 0.25,
+    min_allowed_radius: float = MIN_FILLET_RADIUS,
     skip_invalid_corners: bool = True,
     exact_curve_trim: bool = True,
     intersection_safety_margin: float = 0.01,
@@ -111,8 +112,8 @@ def validate_processing_options(options: ProcessingOptions) -> None:
         raise ValueError("corner_radius must be non-negative")
     if options.max_radius_shrink_iterations < 0:
         raise ValueError("max_radius_shrink_iterations must be >= 0")
-    if options.min_allowed_radius < 0.0:
-        raise ValueError("min_allowed_radius must be non-negative")
+    if options.min_allowed_radius < MIN_FILLET_RADIUS:
+        raise ValueError(f"min_allowed_radius must be >= {MIN_FILLET_RADIUS}")
     if options.intersection_safety_margin < 0.0:
         raise ValueError("intersection_safety_margin must be non-negative")
 

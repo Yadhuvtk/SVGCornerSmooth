@@ -1,4 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
+/* eslint-disable react-hooks/immutability, react-hooks/exhaustive-deps */
 import { sanitizeSvg, withCornerHighlight } from '../lib/svgViewBox'
 
 const ZOOM_MIN = 0.08
