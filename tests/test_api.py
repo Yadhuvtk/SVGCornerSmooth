@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from backend.app import create_app
-from backend.config import BackendConfig
+from backend.config import API_REVISION, BackendConfig
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent / 'fixtures'
@@ -39,6 +39,7 @@ def malformed_svg_text() -> str:
 
 def _assert_top_level_shape(payload: dict):
     assert 'ok' in payload
+    assert 'api_revision' in payload
     assert 'summary' in payload or payload.get('ok') is False
     if payload.get('ok'):
         for key in ('corners', 'rejected_corners', 'diagnostics', 'svg'):
@@ -50,6 +51,7 @@ def test_health_returns_200(client):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload['ok'] is True
+    assert payload['api_revision'] == API_REVISION
 
 
 def test_profiles_returns_detection_modes_and_radius_profiles(client):
@@ -57,6 +59,7 @@ def test_profiles_returns_detection_modes_and_radius_profiles(client):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload['ok'] is True
+    assert payload['api_revision'] == API_REVISION
     assert 'detection_modes' in payload
     assert 'radius_profiles' in payload
 
@@ -80,6 +83,7 @@ def test_analyze_with_empty_body_returns_400(client):
     assert response.status_code == 400
     payload = response.get_json()
     assert payload['ok'] is False
+    assert payload['api_revision'] == API_REVISION
     assert payload['error'] == 'empty_input'
 
 
@@ -89,6 +93,7 @@ def test_analyze_with_oversized_body_returns_413(client, backend_cfg):
     assert response.status_code == 413
     payload = response.get_json()
     assert payload['ok'] is False
+    assert payload['api_revision'] == API_REVISION
     assert payload['error'] == 'file_too_large'
 
 
@@ -97,6 +102,7 @@ def test_analyze_with_malformed_svg_returns_422(client, malformed_svg_text):
     assert response.status_code == 422
     payload = response.get_json()
     assert payload['ok'] is False
+    assert payload['api_revision'] == API_REVISION
     assert 'parse_error' in payload['error']
 
 
@@ -180,3 +186,43 @@ def test_analyze_cache_header_and_clear_route(client, simple_svg_bytes):
     assert cleared.status_code == 200
     payload = cleared.get_json()
     assert payload['ok'] is True
+    assert payload['api_revision'] == API_REVISION
+    assert payload['cleared'] is True
+    assert payload['entries_removed'] > 0
+
+
+def test_analyze_cache_key_changes_when_options_change(client, simple_svg_bytes):
+    first = client.post(
+        '/api/analyze',
+        data={
+            'file': (io.BytesIO(simple_svg_bytes), 'simple_rect.svg'),
+            'detectionMode': 'accurate',
+            'angleThreshold': '45',
+        },
+        content_type='multipart/form-data',
+    )
+    second = client.post(
+        '/api/analyze',
+        data={
+            'file': (io.BytesIO(simple_svg_bytes), 'simple_rect.svg'),
+            'detectionMode': 'hybrid_advanced',
+            'angleThreshold': '45',
+        },
+        content_type='multipart/form-data',
+    )
+    third = client.post(
+        '/api/analyze',
+        data={
+            'file': (io.BytesIO(simple_svg_bytes), 'simple_rect.svg'),
+            'detectionMode': 'hybrid_advanced',
+            'angleThreshold': '52',
+        },
+        content_type='multipart/form-data',
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 200
+    assert first.headers.get('X-Cache') == 'MISS'
+    assert second.headers.get('X-Cache') == 'MISS'
+    assert third.headers.get('X-Cache') == 'MISS'

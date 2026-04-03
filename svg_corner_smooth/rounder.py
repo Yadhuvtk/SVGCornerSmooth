@@ -53,8 +53,8 @@ def _neighbor_distances(corners: list[CornerSeverity]) -> dict[str, tuple[float,
     return out
 
 
-def _legacy_candidates(entry: Any, options: ProcessingOptions) -> dict[int, Any]:
-    """Build legacy corner candidates keyed by node id for rounding geometry."""
+def _legacy_candidates(entry: Any, options: ProcessingOptions) -> list[Any]:
+    """Build legacy corner candidates used by the legacy fillet geometry engine."""
     relaxed_min_segment = max(0.0, options.min_segment_length * 0.2)
     candidates = _legacy.detect_corners_in_path(
         path=entry.path,
@@ -64,7 +64,63 @@ def _legacy_candidates(entry: Any, options: ProcessingOptions) -> dict[int, Any]
         min_segment_length=relaxed_min_segment,
         debug=options.debug,
     )
-    return {item.node_id: item for item in candidates}
+    return list(candidates)
+
+
+def _corner_point(corner: Any) -> complex:
+    return complex(float(corner.x), float(corner.y))
+
+
+def _match_legacy_corner(
+    corner: CornerSeverity,
+    legacy_candidates: list[Any],
+) -> Any | None:
+    """Match detected corner to legacy trim corner using geometry-first logic."""
+    if not legacy_candidates:
+        return None
+
+    corner_pt = _corner_point(corner)
+    local_hint = max(
+        0.35,
+        float(corner.neighborhood_scale or 0.0),
+        float(corner.local_scale or 0.0) * 0.18,
+    )
+    tolerance = max(0.35, min(local_hint, 7.5))
+
+    def _nearest(candidates: list[Any]) -> tuple[Any, float] | None:
+        if not candidates:
+            return None
+        picked = min(candidates, key=lambda item: abs(_corner_point(item) - corner_pt))
+        return picked, float(abs(_corner_point(picked) - corner_pt))
+
+    node_matches = [item for item in legacy_candidates if int(item.node_id) == int(corner.node_id)]
+    nearest_node = _nearest(node_matches)
+    if nearest_node is not None and nearest_node[1] <= tolerance:
+        return nearest_node[0]
+
+    nearest_any = _nearest(legacy_candidates)
+    if nearest_any is not None and nearest_any[1] <= tolerance:
+        return nearest_any[0]
+
+    return None
+
+
+def _allow_rounding(corner: CornerSeverity, angle_threshold: float) -> tuple[bool, str | None]:
+    """
+    Gate fragile corners before geometric fillet application.
+
+    Hybrid detection can include low-confidence mild turns that are useful for
+    diagnostics but unsafe to fillet with large radii.
+    """
+    score = float(corner.final_corner_score or corner.severity_score or 0.0)
+    if score < 0.05:
+        return False, "low_confidence_corner"
+
+    mild_turn_limit = max(55.0, angle_threshold + 10.0)
+    if corner.angle_deg < mild_turn_limit and score < 0.12:
+        return False, "low_angle_low_confidence"
+
+    return True, None
 
 
 def _compute_radius_map(
@@ -207,6 +263,8 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
         export_mode=options.export_mode,
     )
     summary = ProcessingSummary(paths_found=len(parsed_doc.entries))
+    should_round = options.apply_rounding or options.export_mode == "apply_rounding"
+    needs_legacy_candidates = should_round or options.export_mode == "preview_arcs"
 
     if not parsed_doc.entries:
         diagnostics.warnings.append("No supported geometry elements found.")
@@ -236,16 +294,29 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
         )
         severity_corners.extend(detected)
 
-        candidate_map = _legacy_candidates(entry, options)
+        if not needs_legacy_candidates:
+            continue
+
+        candidate_pool = _legacy_candidates(entry, options)
         for corner in detected:
-            legacy_corner = candidate_map.get(corner.node_id)
+            if should_round:
+                can_round, gate_reason = _allow_rounding(corner, options.angle_threshold)
+                if not can_round:
+                    diagnostics.warnings.append(
+                        f"Skipped rounding gate for path {corner.path_id} node {corner.node_id}: {gate_reason}."
+                    )
+                    continue
+
+            legacy_corner = _match_legacy_corner(corner, candidate_pool)
             if legacy_corner is None:
                 diagnostics.warnings.append(
                     f"Missing trim candidate for path {corner.path_id} node {corner.node_id}; skipped for rounding."
                 )
                 continue
+
             legacy_selected.append(legacy_corner)
-            legacy_by_path[corner.path_id].append(legacy_corner)
+            if should_round:
+                legacy_by_path[corner.path_id].append(legacy_corner)
 
     summary.corners_found = len(severity_corners)
     radius_map = _compute_radius_map(severity_corners, options)
@@ -259,7 +330,6 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
     rounded_count = 0
     skipped_count = 0
 
-    should_round = options.apply_rounding or options.export_mode == "apply_rounding"
     if should_round and options.corner_radius <= 0.0 and not options.per_corner_radii:
         diagnostics.warnings.append("Rounding requested but corner_radius is 0; no fillets applied.")
         should_round = False

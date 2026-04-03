@@ -27,6 +27,7 @@ SUPPORTED_DETECTION_MODES = (
     "fast",
     "accurate",
     "preserve_shape",
+    "hybrid_advanced",
 )
 
 SUPPORTED_EXPORT_MODES = (

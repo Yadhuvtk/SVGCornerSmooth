@@ -57,7 +57,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--detection-mode",
         default="accurate",
-        choices=("fast", "accurate", "preserve_shape"),
+        choices=("fast", "accurate", "preserve_shape", "hybrid_advanced"),
     )
     parser.add_argument(
         "--export-mode",
@@ -71,7 +71,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--corner-overrides-json", default=None, help="JSON map like {'0:12': 6.5}")
     parser.add_argument("--max-radius-shrink-iterations", type=int, default=10)
-    parser.add_argument("--min-allowed-radius", type=float, default=0.25)
+    parser.add_argument("--min-allowed-radius", type=float, default=0.5)
     parser.add_argument("--intersection-safety-margin", type=float, default=0.01)
     parser.add_argument("--no-skip-invalid-corners", action="store_true")
     parser.add_argument("--no-exact-curve-trim", action="store_true")

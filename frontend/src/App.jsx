@@ -30,6 +30,7 @@ export default function App() {
     cornerOverrides,
     loading,
     error,
+    backendRevisionWarning,
     fatalError,
     pipelineStage,
     activeAction,
@@ -137,6 +138,7 @@ export default function App() {
             {diagnostics?.warnings?.length ? (
               <p className="warning-text">{diagnostics.warnings[0]}</p>
             ) : null}
+            {backendRevisionWarning ? <p className="warning-text">{backendRevisionWarning}</p> : null}
             {error ? <p className="error-text">{error}</p> : null}
             {loading ? (
               <div className="loading-inline" role="status" aria-live="polite">

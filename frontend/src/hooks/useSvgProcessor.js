@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { analyzeSvg, fetchProfiles, processSvgCompat, roundSvg } from '../lib/api'
-import { optimizeSvg } from '../lib/svgoOptimize'
+import { analyzeSvg, fetchHealth, fetchProfiles, processSvgCompat, roundSvg } from '../lib/api'
+
+const EXPECTED_API_REVISION = 2
+const OUTDATED_BACKEND_WARNING = 'Backend looks outdated. Restart backend to use latest corner detection.'
 
 const FINALIZE_PARAMS = Object.freeze({
   angleThreshold: 45,
@@ -8,7 +10,7 @@ const FINALIZE_PARAMS = Object.freeze({
   markerRadius: 3,
   minSegmentLength: 1,
   cornerRadius: 12,
-  detectionMode: 'accurate',
+  detectionMode: 'hybrid_advanced',
   radiusProfile: 'adaptive',
   maxRadiusShrinkIterations: 10,
   minAllowedRadius: 0.5,
@@ -63,21 +65,29 @@ export function useSvgProcessor() {
   const [activeAction, setActiveAction] = useState('')
   const [showAnalyzeDelayMessage, setShowAnalyzeDelayMessage] = useState(false)
   const [error, setError] = useState('')
+  const [backendRevisionWarning, setBackendRevisionWarning] = useState('')
   const [fatalError, setFatalError] = useState(null)
 
   const abortRef = useRef(null)
 
   useEffect(() => {
     const controller = new AbortController()
-    fetchProfiles(controller.signal)
-      .then(() => {
+    Promise.all([fetchProfiles(controller.signal), fetchHealth(controller.signal)])
+      .then(([profilesPayload, healthPayload]) => {
         if (controller.signal.aborted) return
         setError('')
         setFatalError(null)
+        const resolvedRevision = Number(profilesPayload?.api_revision ?? healthPayload?.api_revision)
+        if (!Number.isFinite(resolvedRevision) || resolvedRevision < EXPECTED_API_REVISION) {
+          setBackendRevisionWarning(OUTDATED_BACKEND_WARNING)
+        } else {
+          setBackendRevisionWarning('')
+        }
       })
       .catch((err) => {
         if (controller.signal.aborted) return
         setError(err instanceof Error ? err.message : 'Failed to connect backend.')
+        setBackendRevisionWarning('')
         if (isBackendOfflineError(err)) {
           setFatalError(new Error('backend_offline'))
         }
@@ -183,7 +193,6 @@ export function useSvgProcessor() {
       })
       if (signal.aborted) return
       applyPayload(analyzePayload)
-      setProcessedSvgText(getSvgText(analyzePayload))
 
       setPipelineStage('preview')
       const previewPayload = await processSvgCompat({
@@ -193,7 +202,6 @@ export function useSvgProcessor() {
       })
       if (signal.aborted) return
       applyPayload(previewPayload)
-      setProcessedSvgText(getSvgText(previewPayload))
 
       setPipelineStage('round')
       const roundedPayload = await roundSvg({
@@ -207,7 +215,9 @@ export function useSvgProcessor() {
       })
       if (signal.aborted) return
       applyPayload(roundedPayload)
-      setProcessedSvgText(optimizeSvg(getSvgText(roundedPayload)))
+      // Keep final geometry exactly as backend produced it.
+      // Additional client-side path conversion can alter sensitive glyph contours.
+      setProcessedSvgText(getSvgText(roundedPayload))
       setPipelineStage('done')
     })
   }, [applyPayload, cornerOverrides, inputFile, withRequestState])
@@ -256,7 +266,7 @@ export function useSvgProcessor() {
       })
       if (signal.aborted) return
       applyPayload(payload)
-      setProcessedSvgText(optimizeSvg(getSvgText(payload)))
+      setProcessedSvgText(getSvgText(payload))
       setPipelineStage('done')
     })
   }, [applyPayload, cornerOverrides, inputFile, withRequestState])
@@ -319,6 +329,7 @@ export function useSvgProcessor() {
     activeAction,
     showAnalyzeDelayMessage,
     error,
+    backendRevisionWarning,
     fatalError,
     cornerOverrides,
     selectFile,

@@ -7,7 +7,7 @@ Advanced local-first toolkit for SVG sharp-corner detection, diagnostics, and pr
 SVGCornerSmooth analyzes real SVG vector geometry (`path`, `polyline`, `polygon`, `rect`, `circle`, `ellipse`) using `svgpathtools`, computes corner severity diagnostics, and can apply safe fillet rounding with radius profiles.
 
 Highlights:
-- Detection modes: `fast`, `accurate`, `preserve_shape`
+- Detection modes: `fast`, `accurate`, `preserve_shape`, `hybrid_advanced`
 - Radius profiles: `fixed`, `vectorizer_legacy`, `adaptive`, `preserve_shape`, `aggressive`
 - Safe rounding with shrink-on-failure validation
 - Robust fillet solver fallback (`ok` / `shrunk` / `skipped`) with rejection reasons
@@ -36,6 +36,8 @@ svg_corner_smooth/
   parser.py
   radius_profiles.py
   rounder.py
+  sampling.py
+  curvature.py
   tangents.py
   utils.py
   validate.py
@@ -57,6 +59,7 @@ tests/
   test_parser.py
   test_tangents.py
   test_detect.py
+  test_detect_advanced.py
   test_radius_profiles.py
   test_fillet.py
   test_legacy_runtime.py
@@ -104,6 +107,7 @@ python detect_svg_corners.py input.svg
 python detect_svg_corners.py input.svg output.svg --angle-threshold 35 --debug
 python detect_svg_corners.py input.svg output.svg --apply-rounding --corner-radius 10 --radius-profile adaptive
 python detect_svg_corners.py input.svg output.svg --export-mode diagnostics_overlay --detection-mode preserve_shape
+python detect_svg_corners.py input.svg output.svg --detection-mode hybrid_advanced --debug
 ```
 
 Legacy realtime/live window still works:
@@ -204,6 +208,51 @@ Common response shape:
 - `fast`: tangent-angle detection optimized for speed
 - `accurate`: improved tangent sampling and severity scoring
 - `preserve_shape`: conservative detection for logos/tiny detail
+- `hybrid_advanced`: fused tangent + local-turn + curvature detector for production corner finding
+
+## Advanced Corner Detection
+
+`hybrid_advanced` runs a 3-layer geometry-driven pipeline:
+
+1. **Join tangent discontinuity**
+   - robust start/end tangents with confidence
+   - catches line-line, line-curve, curve-line, curve-curve sharp joins
+2. **Local sampled turning-angle peaks**
+   - adaptive arc-length sampling
+   - catches sharp-looking local turns that endpoint-only logic can miss
+3. **Localized curvature spikes**
+   - curvature profiles on curves/arcs
+   - emphasizes sharp spikes and suppresses broad smooth bends
+
+All candidate evidence is merged spatially and fused with weighted scoring:
+
+`final_corner_score = 0.25*tangent + 0.55*local_turn + 0.20*curvature`
+
+The detector returns backward-compatible fields plus advanced diagnostics.
+
+Example detected-corner payload:
+
+```json
+{
+  "path_id": 0,
+  "node_id": 12,
+  "x": 120.41,
+  "y": 56.03,
+  "angle_deg": 97.4,
+  "join_type": "corner",
+  "source_type": "join",
+  "tangent_angle_deg": 97.4,
+  "local_turn_deg": 89.1,
+  "curvature_peak": 0.3221,
+  "tangent_discontinuity_score": 0.61,
+  "local_turn_score": 0.49,
+  "curvature_spike_score": 0.28,
+  "endpoint_confidence": 0.93,
+  "final_corner_score": 0.57,
+  "confidence": 0.71,
+  "detection_reason": "join_tangent_discontinuity,local_turn_peak"
+}
+```
 
 ### Radius profiles
 - `fixed`: exact requested radius

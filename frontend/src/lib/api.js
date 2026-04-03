@@ -48,6 +48,20 @@ export function processSvgCompat({ file, params, signal }) {
   return sendSvgRequest('/api/process', { file, params, signal })
 }
 
+export async function fetchHealth(signal) {
+  let response
+  try {
+    response = await fetch(endpoint('/api/health'), { signal })
+  } catch {
+    throw new Error('Cannot reach SVGCornerSmooth backend. Start `python api_server.py` (default: 127.0.0.1:5050).')
+  }
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(payload?.error || 'Failed to load health')
+  }
+  return payload
+}
+
 export async function fetchProfiles(signal) {
   let response
   try {

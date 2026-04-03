@@ -26,6 +26,26 @@ class CornerSeverity:
     join_type: str
     suggested_radius: float = 0.0
     diagnostic_notes: list[str] = field(default_factory=list)
+    # Advanced detection evidence fields (backward-compatible extensions).
+    source_type: str = "join"
+    path_index: int = -1
+    segment_index_before: int = -1
+    segment_index_after: int = -1
+    point: complex = 0 + 0j
+    tangent_angle_deg: float = 0.0
+    local_turn_deg: float = 0.0
+    curvature_peak: float = 0.0
+    severity: float = 0.0
+    confidence: float = 0.0
+    final_corner_score: float = 0.0
+    detection_reason: str = ""
+    neighborhood_scale: float = 0.0
+    tangent_discontinuity_score: float = 0.0
+    local_turn_score: float = 0.0
+    curvature_spike_score: float = 0.0
+    endpoint_confidence: float = 0.0
+    geometric_scale_factor: float = 0.0
+    debug: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

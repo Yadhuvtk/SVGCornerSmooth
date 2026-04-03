@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import OrderedDict
 from typing import Any
 
@@ -32,7 +33,7 @@ class ApiError(Exception):
         self.status_code = status_code
 
 
-def _build_response(result: Any) -> dict[str, Any]:
+def _build_response(result: Any, api_revision: int) -> dict[str, Any]:
     summary = summary_to_dict(result.summary)
     corners_payload = [corner_to_dict(corner) for corner in result.corners]
     rejected_payload = [rejected_to_dict(item) for item in result.diagnostics.rejected_corners]
@@ -41,6 +42,7 @@ def _build_response(result: Any) -> dict[str, Any]:
     # Keep compatibility fields used by previous frontend versions.
     response = {
         "ok": True,
+        "api_revision": int(api_revision),
         "summary": summary,
         "corners": corners_payload,
         "rejected_corners": rejected_payload,
@@ -59,8 +61,11 @@ def _build_response(result: Any) -> dict[str, Any]:
     return response
 
 
-def _error_response(error: str, status_code: int) -> tuple[Response, int]:
-    return jsonify({"ok": False, "error": error}), status_code
+def _error_response(error: str, status_code: int, api_revision: int | None = None) -> tuple[Response, int]:
+    payload: dict[str, Any] = {"ok": False, "error": error}
+    if api_revision is not None:
+        payload["api_revision"] = int(api_revision)
+    return jsonify(payload), status_code
 
 
 def _ensure_supported_content_type() -> None:
@@ -118,8 +123,30 @@ def _analyze_cache_put(key: str, payload: dict[str, Any]) -> None:
         _ANALYZE_CACHE.popitem(last=False)
 
 
-def _cache_key_for_svg(svg_bytes: bytes) -> str:
-    return hashlib.sha256(svg_bytes).hexdigest()
+def _normalize_analyze_options(options: Any) -> dict[str, Any]:
+    """Normalize analyze options that can affect response payload."""
+    return {
+        "angle_threshold": round(float(options.angle_threshold), 6),
+        "samples_per_curve": int(options.samples_per_curve),
+        "min_segment_length": round(float(options.min_segment_length), 6),
+        "detection_mode": str(options.detection_mode),
+        "corner_radius": round(float(options.corner_radius), 6),
+        "radius_profile": str(options.radius_profile),
+        "export_mode": str(options.export_mode),
+        "marker_radius": round(float(options.marker_radius), 6),
+    }
+
+
+def _cache_key_for_analyze(svg_bytes: bytes, options: Any, api_revision: int) -> str:
+    svg_hash = hashlib.sha256(svg_bytes).hexdigest()
+    normalized = _normalize_analyze_options(options)
+    payload = {
+        "api_revision": int(api_revision),
+        "svg_sha256": svg_hash,
+        "options": normalized,
+    }
+    cache_material = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(cache_material).hexdigest()
 
 
 def create_app(config: BackendConfig | None = None) -> Flask:
@@ -138,13 +165,14 @@ def create_app(config: BackendConfig | None = None) -> Flask:
 
     @app.get("/api/health")
     def health() -> Any:
-        return jsonify({"ok": True, "max_upload_mb": round(cfg.max_upload_mb, 3)})
+        return jsonify({"ok": True, "api_revision": cfg.API_REVISION, "max_upload_mb": round(cfg.max_upload_mb, 3)})
 
     @app.get("/api/profiles")
     def profiles() -> Any:
         return jsonify(
             {
                 "ok": True,
+                "api_revision": cfg.API_REVISION,
                 "detection_modes": list(SUPPORTED_DETECTION_MODES),
                 "radius_profiles": list(SUPPORTED_RADIUS_PROFILES),
                 "export_modes": list(SUPPORTED_EXPORT_MODES),
@@ -160,8 +188,17 @@ def create_app(config: BackendConfig | None = None) -> Flask:
 
     @app.delete("/api/cache")
     def clear_cache_route() -> Any:
+        entries_removed = len(_ANALYZE_CACHE)
         _ANALYZE_CACHE.clear()
-        return jsonify({"ok": True, "error": None, "cleared": True})
+        return jsonify(
+            {
+                "ok": True,
+                "error": None,
+                "api_revision": cfg.API_REVISION,
+                "cleared": True,
+                "entries_removed": entries_removed,
+            }
+        )
 
     @app.post("/api/analyze")
     def analyze_route() -> Any:
@@ -178,7 +215,7 @@ def create_app(config: BackendConfig | None = None) -> Flask:
 
             validate_processing_options(options)
 
-            cache_key = _cache_key_for_svg(svg_bytes)
+            cache_key = _cache_key_for_analyze(svg_bytes, options, cfg.API_REVISION)
             cached_payload = _analyze_cache_get(cache_key)
             if cached_payload is not None:
                 response = jsonify(cached_payload)
@@ -186,19 +223,19 @@ def create_app(config: BackendConfig | None = None) -> Flask:
                 return response
 
             result = analyze_svg(svg_bytes, options)
-            payload = _build_response(result)
+            payload = _build_response(result, api_revision=cfg.API_REVISION)
             _analyze_cache_put(cache_key, payload)
             response = jsonify(payload)
             response.headers["X-Cache"] = "MISS"
             return response
         except ApiError as exc:
-            return _error_response(exc.error, exc.status_code)
+            return _error_response(exc.error, exc.status_code, api_revision=cfg.API_REVISION)
         except RequestEntityTooLarge:
-            return _error_response("file_too_large", 413)
+            return _error_response("file_too_large", 413, api_revision=cfg.API_REVISION)
         except ValueError as exc:
-            return _error_response(str(exc), 400)
+            return _error_response(str(exc), 400, api_revision=cfg.API_REVISION)
         except Exception as exc:
-            return _error_response(f"Unexpected server failure: {exc}", 500)
+            return _error_response(f"Unexpected server failure: {exc}", 500, api_revision=cfg.API_REVISION)
 
     @app.post("/api/round")
     def round_route() -> Any:
@@ -214,15 +251,15 @@ def create_app(config: BackendConfig | None = None) -> Flask:
 
             validate_processing_options(options)
             result = round_svg(svg_bytes, options)
-            return jsonify(_build_response(result))
+            return jsonify(_build_response(result, api_revision=cfg.API_REVISION))
         except ApiError as exc:
-            return _error_response(exc.error, exc.status_code)
+            return _error_response(exc.error, exc.status_code, api_revision=cfg.API_REVISION)
         except RequestEntityTooLarge:
-            return _error_response("file_too_large", 413)
+            return _error_response("file_too_large", 413, api_revision=cfg.API_REVISION)
         except ValueError as exc:
-            return _error_response(str(exc), 400)
+            return _error_response(str(exc), 400, api_revision=cfg.API_REVISION)
         except Exception as exc:
-            return _error_response(f"Unexpected server failure: {exc}", 500)
+            return _error_response(f"Unexpected server failure: {exc}", 500, api_revision=cfg.API_REVISION)
 
     @app.post("/api/process")
     def process_route() -> Any:
@@ -237,14 +274,14 @@ def create_app(config: BackendConfig | None = None) -> Flask:
             validate_processing_options(options)
 
             result = process_svg(svg_bytes, options)
-            return jsonify(_build_response(result))
+            return jsonify(_build_response(result, api_revision=cfg.API_REVISION))
         except ApiError as exc:
-            return _error_response(exc.error, exc.status_code)
+            return _error_response(exc.error, exc.status_code, api_revision=cfg.API_REVISION)
         except RequestEntityTooLarge:
-            return _error_response("file_too_large", 413)
+            return _error_response("file_too_large", 413, api_revision=cfg.API_REVISION)
         except ValueError as exc:
-            return _error_response(str(exc), 400)
+            return _error_response(str(exc), 400, api_revision=cfg.API_REVISION)
         except Exception as exc:
-            return _error_response(f"Unexpected server failure: {exc}", 500)
+            return _error_response(f"Unexpected server failure: {exc}", 500, api_revision=cfg.API_REVISION)
 
     return app

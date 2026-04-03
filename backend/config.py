@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 
 MAX_SVG_BYTES = 5 * 1024 * 1024  # 5 MB
+API_REVISION = 2
 
 
 @dataclass
@@ -13,12 +14,17 @@ class BackendConfig:
     """Flask backend config loaded from environment."""
 
     max_svg_bytes: int = MAX_SVG_BYTES
+    api_revision: int = API_REVISION
     cors_origin: str = "*"
     debug: bool = False
 
     @property
     def MAX_SVG_BYTES(self) -> int:
         return int(self.max_svg_bytes)
+
+    @property
+    def API_REVISION(self) -> int:
+        return int(self.api_revision)
 
     @property
     def max_upload_bytes(self) -> int:

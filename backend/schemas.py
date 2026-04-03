@@ -16,6 +16,7 @@ class ApiResponseSchema(TypedDict, total=False):
 
     ok: bool
     error: NotRequired[str]
+    api_revision: NotRequired[int]
     summary: NotRequired[dict[str, Any]]
     corners: NotRequired[list[dict[str, Any]]]
     rejected_corners: NotRequired[list[dict[str, Any]]]

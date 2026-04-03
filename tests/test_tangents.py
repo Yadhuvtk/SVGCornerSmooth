@@ -1,7 +1,13 @@
-from svgpathtools import Arc, CubicBezier, Line, Path
+﻿from svgpathtools import Arc, CubicBezier, Line, Path
 
 from svg_corner_smooth.detect import detect_corners
-from svg_corner_smooth.tangents import estimate_endpoint_tangent
+from svg_corner_smooth.tangents import (
+    estimate_endpoint_tangent,
+    safe_unit_vector,
+    segment_end_tangent,
+    segment_start_tangent,
+    tangent_angle_degrees,
+)
 
 
 def test_line_endpoint_tangent() -> None:
@@ -21,6 +27,28 @@ def test_curve_and_arc_tangent_stability() -> None:
 
     assert tangent_cubic is not None
     assert tangent_arc is not None
+
+
+def test_endpoint_tangent_confidence_helpers() -> None:
+    segment = Line(complex(0, 0), complex(0, 10))
+    start, start_conf = segment_start_tangent(segment)
+    end, end_conf = segment_end_tangent(segment)
+
+    assert start_conf > 0.9
+    assert end_conf > 0.9
+    assert abs(start.imag - 1.0) < 1e-9
+    assert abs(end.imag - 1.0) < 1e-9
+
+
+def test_tangent_angle_degrees_for_perpendicular_vectors() -> None:
+    angle = tangent_angle_degrees(complex(1, 0), complex(0, 1))
+    assert 89.9 <= angle <= 90.1
+
+
+def test_safe_unit_vector_fallback_for_tiny_input() -> None:
+    unit = safe_unit_vector(0 + 0j, fallback=complex(0, 2))
+    assert abs(unit.real) < 1e-9
+    assert abs(unit.imag - 1.0) < 1e-9
 
 
 def test_degenerate_consecutive_points_do_not_raise() -> None:
