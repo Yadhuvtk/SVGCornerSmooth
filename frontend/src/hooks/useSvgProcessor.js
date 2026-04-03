@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { analyzeSvg, fetchHealth, fetchProfiles, processSvgCompat, roundSvg } from '../lib/api'
 
-const EXPECTED_API_REVISION = 2
+const EXPECTED_API_REVISION = 3
 const OUTDATED_BACKEND_WARNING = 'Backend looks outdated. Restart backend to use latest corner detection.'
 
 const FINALIZE_PARAMS = Object.freeze({
@@ -10,7 +10,7 @@ const FINALIZE_PARAMS = Object.freeze({
   markerRadius: 3,
   minSegmentLength: 1,
   cornerRadius: 12,
-  detectionMode: 'hybrid_advanced',
+  detectionMode: 'strict_junction',
   radiusProfile: 'adaptive',
   maxRadiusShrinkIterations: 10,
   minAllowedRadius: 0.5,

@@ -410,6 +410,7 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
     if should_round:
         export_mode = "apply_rounding"
 
+    path_lookup = {int(entry.path_id): entry.path for entry in parsed_doc.entries}
     arc_preview = apply_overlay(
         root=parsed_doc.root,
         namespace=parsed_doc.namespace,
@@ -422,6 +423,7 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
         debug=options.debug,
         diagnostics=diagnostics,
         per_corner_radii=options.per_corner_radii,
+        path_lookup=path_lookup,
     )
 
     summary.corners_rounded = rounded_count

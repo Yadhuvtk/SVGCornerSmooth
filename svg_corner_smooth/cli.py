@@ -57,7 +57,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--detection-mode",
         default="accurate",
-        choices=("fast", "accurate", "preserve_shape", "hybrid_advanced"),
+        choices=("fast", "accurate", "preserve_shape", "hybrid_advanced", "strict_junction"),
     )
     parser.add_argument(
         "--export-mode",

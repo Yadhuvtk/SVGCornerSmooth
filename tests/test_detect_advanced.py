@@ -123,3 +123,18 @@ def test_close_corners_are_not_collapsed_on_large_path_scale() -> None:
 
     near_small_rect = [corner for corner in corners if 5095.0 <= corner.x <= 5125.0 and -5.0 <= corner.y <= 25.0]
     assert len(near_small_rect) >= 4
+
+
+def test_strict_junction_detects_closure_corner_and_dedupes() -> None:
+    path = parse_path("M 0,0 L 20,0 L 20,20 L 0,20 Z")
+    corners = _run_detect(path, mode="strict_junction", angle_threshold=20.0, min_segment_length=0.1)
+    assert len(corners) == 4
+    assert any(abs(corner.x - 0.0) < 1e-6 and abs(corner.y - 0.0) < 1e-6 for corner in corners)
+    assert all(80.0 <= corner.angle_deg <= 100.0 for corner in corners)
+
+
+def test_strict_junction_ignores_tiny_noise_segments() -> None:
+    path = parse_path("M0,0 L20,0 L20,0.02 L20,20")
+    corners = _run_detect(path, mode="strict_junction", angle_threshold=20.0, min_segment_length=0.0)
+    assert len(corners) == 1
+    assert 80.0 <= corners[0].angle_deg <= 100.0

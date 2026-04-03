@@ -7,7 +7,7 @@ Advanced local-first toolkit for SVG sharp-corner detection, diagnostics, and pr
 SVGCornerSmooth analyzes real SVG vector geometry (`path`, `polyline`, `polygon`, `rect`, `circle`, `ellipse`) using `svgpathtools`, computes corner severity diagnostics, and can apply safe fillet rounding with radius profiles.
 
 Highlights:
-- Detection modes: `fast`, `accurate`, `preserve_shape`, `hybrid_advanced`
+- Detection modes: `fast`, `accurate`, `preserve_shape`, `hybrid_advanced`, `strict_junction`
 - Radius profiles: `fixed`, `vectorizer_legacy`, `adaptive`, `preserve_shape`, `aggressive`
 - Safe rounding with shrink-on-failure validation
 - Robust fillet solver fallback (`ok` / `shrunk` / `skipped`) with rejection reasons
@@ -108,6 +108,7 @@ python detect_svg_corners.py input.svg output.svg --angle-threshold 35 --debug
 python detect_svg_corners.py input.svg output.svg --apply-rounding --corner-radius 10 --radius-profile adaptive
 python detect_svg_corners.py input.svg output.svg --export-mode diagnostics_overlay --detection-mode preserve_shape
 python detect_svg_corners.py input.svg output.svg --detection-mode hybrid_advanced --debug
+python detect_svg_corners.py input.svg output.svg --detection-mode strict_junction --debug
 ```
 
 Legacy realtime/live window still works:
@@ -209,6 +210,7 @@ Common response shape:
 - `accurate`: improved tangent sampling and severity scoring
 - `preserve_shape`: conservative detection for logos/tiny detail
 - `hybrid_advanced`: fused tangent + local-turn + curvature detector for production corner finding
+- `strict_junction`: join-only sharp-corner detector (20°–160° band, min segment length floor, closure join checks, geometric dedupe)
 
 ## Advanced Corner Detection
 
@@ -229,6 +231,12 @@ All candidate evidence is merged spatially and fused with weighted scoring:
 `final_corner_score = 0.25*tangent + 0.55*local_turn + 0.20*curvature`
 
 The detector returns backward-compatible fields plus advanced diagnostics.
+
+For glyph-heavy files where you want strict visible corner joins (and fewer interior curve peaks), use:
+
+```bash
+python detect_svg_corners.py input.svg output.svg --detection-mode strict_junction --debug
+```
 
 Example detected-corner payload:
 

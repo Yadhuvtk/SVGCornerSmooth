@@ -28,6 +28,7 @@ SUPPORTED_DETECTION_MODES = (
     "accurate",
     "preserve_shape",
     "hybrid_advanced",
+    "strict_junction",
 )
 
 SUPPORTED_EXPORT_MODES = (

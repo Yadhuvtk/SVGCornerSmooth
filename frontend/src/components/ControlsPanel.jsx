@@ -37,7 +37,7 @@ export default function ControlsPanel({
   onDownloadDiagnostics,
 }) {
   const radiusProfiles = profiles?.radius_profiles || ['fixed', 'vectorizer_legacy', 'adaptive', 'preserve_shape', 'aggressive']
-  const detectionModes = profiles?.detection_modes || ['fast', 'accurate', 'preserve_shape']
+  const detectionModes = profiles?.detection_modes || ['fast', 'accurate', 'preserve_shape', 'strict_junction']
 
   return (
     <section className="panel">

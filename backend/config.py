@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 
 MAX_SVG_BYTES = 5 * 1024 * 1024  # 5 MB
-API_REVISION = 2
+API_REVISION = 3
 
 
 @dataclass

@@ -6,6 +6,7 @@ from svgpathtools import parse_path
 
 from svg_corner_smooth import _legacy
 from svg_corner_smooth.models import CornerSeverity
+from svg_corner_smooth.overlay import append_arc_preview_from_severity
 from svg_corner_smooth.parser import extract_namespace
 from svg_corner_smooth.parser import parse_svg_document
 from svg_corner_smooth.rounder import _allow_rounding, _match_legacy_corner, analyze_svg, process_svg
@@ -155,3 +156,37 @@ def test_preview_arcs_renders_for_all_detected_corners() -> None:
     result = process_svg(svg_bytes, options)
     assert len(result.corners) >= 1
     assert len(result.arc_preview) == len(result.corners)
+
+
+def test_preview_arcs_estimates_geometry_when_legacy_match_missing() -> None:
+    path = parse_path("M0,0 L10,0 L10,10")
+    corner = _sample_corner(
+        path_id=0,
+        node_id=1,
+        x=10.0,
+        y=0.0,
+        segment_index_before=0,
+        segment_index_after=1,
+        source_type="sample_peak",
+        suggested_radius=6.0,
+        local_scale=5.0,
+        neighborhood_scale=2.0,
+    )
+
+    root = ET.Element("svg")
+    preview = append_arc_preview_from_severity(
+        root=root,
+        namespace="",
+        corners=[corner],
+        legacy_corners=[],
+        corner_radius=6.0,
+        radius_profile="adaptive",
+        per_corner_radii=None,
+        path_lookup={0: path},
+    )
+
+    assert len(preview) == 1
+    item = preview[0]
+    assert item["source"] == "estimated_bisector_center"
+    assert item["center_x"] < corner.x
+    assert item["center_y"] > corner.y

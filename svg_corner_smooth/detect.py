@@ -530,6 +530,147 @@ def _finalize_candidates(
     return output
 
 
+def _dedupe_strict_corners(corners: list[CornerSeverity], distance_threshold: float = 5.0) -> list[CornerSeverity]:
+    """Merge nearby strict candidates to one stable output marker."""
+    if not corners:
+        return []
+
+    kept: list[CornerSeverity] = []
+    for corner in sorted(corners, key=lambda item: (item.final_corner_score, item.angle_deg), reverse=True):
+        duplicate = False
+        for existing in kept:
+            if existing.path_id != corner.path_id:
+                continue
+            if abs(complex(existing.x, existing.y) - complex(corner.x, corner.y)) <= distance_threshold:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(corner)
+
+    kept.sort(key=lambda corner: (corner.path_id, corner.node_id, corner.x, corner.y))
+    return kept
+
+
+def _strict_junction_corners(
+    path: Path,
+    *,
+    path_id: int,
+    angle_threshold: float,
+    min_segment_length: float,
+) -> list[CornerSeverity]:
+    """
+    Detect corners using strict tangent discontinuity at segment junctions.
+
+    This follows the join-focused algorithm:
+    - ignore tiny segments (>= 1.0 unit floor)
+    - evaluate incoming/outgoing tangent angle at joins
+    - keep only [20°, 160°] corners
+    - include closure join for closed subpaths
+    - dedupe nearby corners in geometry space
+    """
+    if len(path) < 2:
+        return []
+
+    diagonal, local_ref = _path_scale(path)
+    min_len = max(1.0, float(min_segment_length))
+    min_angle = max(20.0, float(angle_threshold))
+    max_angle = 160.0
+    join_tolerance = 2.0
+
+    output: list[CornerSeverity] = []
+
+    def _make_corner(prev_index: int, next_index: int) -> CornerSeverity | None:
+        prev_seg = path[prev_index]
+        next_seg = path[next_index]
+
+        prev_len = safe_segment_length(prev_seg)
+        next_len = safe_segment_length(next_seg)
+        if prev_len < min_len or next_len < min_len:
+            return None
+
+        join = complex(next_seg.start)
+        if abs(complex(prev_seg.end) - join) > join_tolerance:
+            return None
+
+        incoming, incoming_conf = segment_end_tangent(prev_seg)
+        outgoing, outgoing_conf = segment_start_tangent(next_seg)
+        endpoint_conf = min(incoming_conf, outgoing_conf)
+        tangent_angle = tangent_angle_degrees(incoming, outgoing)
+
+        if tangent_angle < min_angle or tangent_angle > max_angle:
+            return None
+
+        # Angle-driven confidence score from strict corner band.
+        tangent_score = clamp((tangent_angle - min_angle) / max(1.0, max_angle - min_angle), 0.0, 1.0)
+        final_score = clamp((0.75 * tangent_score) + (0.25 * endpoint_conf), 0.0, 1.0)
+        confidence = clamp((0.55 * final_score) + (0.45 * endpoint_conf), 0.0, 1.0)
+        risk = clamp((1.0 - endpoint_conf) * 0.4, 0.0, 1.0)
+        geometric_scale = clamp(min(prev_len, next_len) / max(local_ref, 1e-6), 0.0, 1.0)
+
+        return CornerSeverity(
+            path_id=path_id,
+            node_id=next_index,
+            x=float(join.real),
+            y=float(join.imag),
+            angle_deg=float(tangent_angle),
+            severity_score=final_score,
+            local_scale=local_ref,
+            prev_segment_length=float(prev_len),
+            next_segment_length=float(next_len),
+            curvature_hint=0.0,
+            risk_score=risk,
+            join_type=classify_join(tangent_angle, min_angle),
+            source_type="join",
+            path_index=path_id,
+            segment_index_before=prev_index,
+            segment_index_after=next_index,
+            point=join,
+            tangent_angle_deg=float(tangent_angle),
+            local_turn_deg=0.0,
+            curvature_peak=0.0,
+            severity=final_score,
+            confidence=confidence,
+            final_corner_score=final_score,
+            detection_reason="strict_tangent_discontinuity",
+            neighborhood_scale=min(prev_len, next_len),
+            tangent_discontinuity_score=tangent_score,
+            local_turn_score=0.0,
+            curvature_spike_score=0.0,
+            endpoint_confidence=endpoint_conf,
+            geometric_scale_factor=geometric_scale,
+            debug={
+                "incoming_tangent": [incoming.real, incoming.imag],
+                "outgoing_tangent": [outgoing.real, outgoing.imag],
+                "path_diagonal": diagonal,
+            },
+        )
+
+    for start, end in split_subpaths(path):
+        if end - start < 2:
+            continue
+
+        filtered: list[int] = []
+        for index in range(start, end):
+            if safe_segment_length(path[index]) >= min_len:
+                filtered.append(index)
+
+        if len(filtered) < 2:
+            continue
+
+        for idx in range(1, len(filtered)):
+            maybe_corner = _make_corner(filtered[idx - 1], filtered[idx])
+            if maybe_corner is not None:
+                output.append(maybe_corner)
+
+        subpath_closed = abs(complex(path[end - 1].end) - complex(path[start].start)) <= join_tolerance
+        if subpath_closed:
+            maybe_corner = _make_corner(filtered[-1], filtered[0])
+            if maybe_corner is not None:
+                output.append(maybe_corner)
+
+    return _dedupe_strict_corners(output, distance_threshold=5.0)
+
+
 def detect_corners(
     path: Path,
     path_id: int,
@@ -540,6 +681,20 @@ def detect_corners(
     debug: bool = False,
 ) -> list[CornerSeverity]:
     """Detect corners and return enriched severity models."""
+    if mode == "strict_junction":
+        corners = _strict_junction_corners(
+            path,
+            path_id=path_id,
+            angle_threshold=angle_threshold,
+            min_segment_length=min_segment_length,
+        )
+        if debug:
+            print(
+                f"[debug] Path {path_id}: strict_junction corners={len(corners)} "
+                f"angle={angle_threshold:.2f} min_len={min_segment_length:.3f}"
+            )
+        return corners
+
     threshold, min_len, _sample_count, profile = _mode_adjustments(
         mode=mode,
         angle_threshold=angle_threshold,
