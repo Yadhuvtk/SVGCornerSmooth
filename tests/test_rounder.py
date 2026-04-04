@@ -111,7 +111,7 @@ def _sample_corner(**overrides) -> CornerSeverity:
 
 
 def test_rounding_gate_blocks_low_confidence_mild_turn() -> None:
-    corner = _sample_corner(angle_deg=52.0, final_corner_score=0.08, severity_score=0.08)
+    corner = _sample_corner(angle_deg=52.0, final_corner_score=0.05, severity_score=0.05)
     allowed, reason = _allow_rounding(corner, angle_threshold=45.0)
     assert allowed is False
     assert reason == "low_angle_low_confidence"
@@ -218,6 +218,19 @@ def test_stitch_tiny_path_gaps_snaps_micro_discontinuity() -> None:
 
     after = abs(path[1].start - path[0].end)
     assert after == 0.0
+
+
+def test_stitch_tiny_path_gaps_closes_near_closed_run() -> None:
+    path = SvgPath(
+        SvgLine(complex(0, 0), complex(10, 0)),
+        SvgLine(complex(10, 0), complex(10, 10)),
+        SvgLine(complex(10, 10), complex(0, 10)),
+        SvgLine(complex(0, 10), complex(0, 0.02)),
+    )
+
+    assert abs(path[0].start - path[-1].end) > 0.0
+    _stitch_tiny_path_gaps(path, tolerance=0.05)
+    assert abs(path[0].start - path[-1].end) == 0.0
 
 
 def test_synthesize_legacy_corner_for_strict_join_when_legacy_missing() -> None:

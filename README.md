@@ -1,309 +1,356 @@
 ﻿# SVGCornerSmooth
 
-Advanced local-first toolkit for SVG sharp-corner detection, diagnostics, and production-safe corner rounding.
+SVGCornerSmooth is a local-first toolkit for finding sharp SVG corners and safely rounding them.
 
-## Overview
+It includes:
+- A Python geometry engine (`svg_corner_smooth/`)
+- A Flask API backend (`backend/`)
+- A React frontend (`frontend/`)
+- A compatibility CLI (`detect_svg_corners.py`)
 
-SVGCornerSmooth analyzes real SVG vector geometry (`path`, `polyline`, `polygon`, `rect`, `circle`, `ellipse`) using `svgpathtools`, computes corner severity diagnostics, and can apply safe fillet rounding with radius profiles.
+The main goal is practical production rounding on real SVGs (logos, glyph-like text outlines, exported artwork), including difficult tiny segments and curve-heavy paths.
 
-Highlights:
-- Detection modes: `fast`, `accurate`, `preserve_shape`, `hybrid_advanced`, `strict_junction`
-- Radius profiles: `fixed`, `vectorizer_legacy`, `adaptive`, `preserve_shape`, `aggressive`
-- Safe rounding with shrink-on-failure validation
-- Robust fillet solver fallback (`ok` / `shrunk` / `skipped`) with rejection reasons
-- Cross-path adjacency-aware radius constraints for shared boundary endpoints
-- Flask API with analyze/round/process routes
-- API input guards (content-type, empty body, malformed SVG, 5 MB limit)
-- Analyze-result cache (`X-Cache: HIT|MISS`) + `DELETE /api/cache`
-- Gunicorn production entrypoint (`backend/wsgi.py`)
-- Simplified React frontend: choose SVG, one-click finalize, download output
-- Single-click pipeline runs: sharp-corner detection -> arc preview -> final rounding
-- Animated optimization progress UI for production-style processing feedback
+## What This Project Does
 
-## Architecture
+1. Detects sharp corners from geometry (not just SVG command letters)
+2. Shows corner diagnostics and arc preview
+3. Applies fillet rounding with safety checks and fallback logic
+4. Returns a clean rounded SVG for download
 
-```text
-svg_corner_smooth/
-  __init__.py
-  _legacy.py
-  cli.py
-  constants.py
-  detect.py
-  diagnostics.py
-  fillet.py
-  models.py
-  overlay.py
-  parser.py
-  radius_profiles.py
-  rounder.py
-  sampling.py
-  curvature.py
-  tangents.py
-  utils.py
-  validate.py
-  legacy_runtime.py
+Supported SVG geometry inputs include:
+- `path`
+- `polyline`
+- `polygon`
+- `rect`
+- `circle`
+- `ellipse`
 
-backend/
-  __init__.py
-  app.py
-  config.py
-  schemas.py
-  wsgi.py
+## Main Workflow (Simple UI)
 
-tests/
-  fixtures/
-    simple_rect.svg
-    malformed.svg
-  test_api.py
-  test_adjacency.py
-  test_parser.py
-  test_tangents.py
-  test_detect.py
-  test_detect_advanced.py
-  test_radius_profiles.py
-  test_fillet.py
-  test_legacy_runtime.py
-  test_rounder.py
+Frontend flow is intentionally simple:
+1. Choose SVG
+2. Click **Finalize SVG**
+3. Wait for pipeline stages: detect -> preview -> round
+4. Download SVG
 
-frontend/
-  src/
-    components/
-    hooks/
-    lib/
-    App.jsx
-```
+There is also a **Legacy** section with separate buttons:
+- Find Sharp Corners
+- Add Arc Preview
+- Finalize Round
 
-## Install (Windows / VS Code)
+## Quick Start
+
+## Prerequisites
+
+- Python 3.10+
+- Node.js 18+
+- npm
+
+## Install
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+cd frontend
+npm install
+```
+
+## Run (Recommended)
+
+From repo root:
+
+```bat
+run_all.bat
+```
+
+This starts:
+- Backend at `http://127.0.0.1:5050`
+- Frontend at `http://localhost:5173`
+
+## Run Manually
+
+Backend:
+
+```bash
+python api_server.py
 ```
 
 Frontend:
 
 ```bash
 cd frontend
-npm install
+npm run dev
 ```
 
-## Run
+## Production Backend
 
-### One-click (Windows)
+`gunicorn` is included for production serving:
 
-```bat
-run_all.bat
+```bash
+make run-prod
 ```
 
-This launches backend and frontend together in two terminal windows.
+Equivalent command:
 
-### CLI
+```bash
+gunicorn backend.wsgi:app --workers 2 --timeout 120 --bind 127.0.0.1:5050 --log-level info
+```
 
-Compatibility entrypoint is preserved:
+Dev make target:
+
+```bash
+make run-dev
+```
+
+## CLI Usage
+
+Compatibility entrypoint:
 
 ```bash
 python detect_svg_corners.py input.svg
 python detect_svg_corners.py input.svg output.svg --angle-threshold 35 --debug
-python detect_svg_corners.py input.svg output.svg --apply-rounding --corner-radius 10 --radius-profile adaptive
-python detect_svg_corners.py input.svg output.svg --export-mode diagnostics_overlay --detection-mode preserve_shape
+python detect_svg_corners.py input.svg output.svg --apply-rounding --corner-radius 12 --radius-profile adaptive
+python detect_svg_corners.py input.svg output.svg --detection-mode strict_junction --apply-rounding --corner-radius 14
 python detect_svg_corners.py input.svg output.svg --detection-mode hybrid_advanced --debug
-python detect_svg_corners.py input.svg output.svg --detection-mode strict_junction --debug
 ```
 
-Legacy realtime/live window still works:
+Legacy realtime/live-window modes are preserved:
 
 ```bash
 python detect_svg_corners.py input.svg --realtime
 python detect_svg_corners.py input.svg --live-window
 ```
 
-### Backend
+## Detection Modes
 
-Compatibility entrypoint is preserved:
+Available modes:
+- `fast`
+- `accurate`
+- `preserve_shape`
+- `hybrid_advanced`
+- `strict_junction`
+
+Practical guidance:
+- Use `strict_junction` for strong visible join-corner detection on glyph-like shapes.
+- Use `hybrid_advanced` when you want geometry-fusion detection (tangent + sampled turn + curvature evidence).
+- Use `preserve_shape` when you want conservative behavior and fewer aggressive edits.
+
+## Radius Profiles
+
+Available profiles:
+- `fixed`
+- `vectorizer_legacy`
+- `adaptive`
+- `preserve_shape`
+- `aggressive`
+
+Practical guidance:
+- `fixed`: direct radius value
+- `adaptive`: safest general default
+- `preserve_shape`: smaller radii in dense areas
+- `aggressive`: larger rounding where possible
+
+## API Overview
+
+Base URL: `http://127.0.0.1:5050`
+
+## Endpoints
+
+- `GET /api/health`
+- `GET /api/profiles`
+- `POST /api/analyze`
+- `POST /api/round`
+- `POST /api/process` (compat route)
+- `DELETE /api/cache`
+
+## Response Contract
+
+Top-level fields include:
+- `ok`
+- `api_revision`
+- `summary`
+- `corners`
+- `rejected_corners`
+- `diagnostics`
+- `svg`
+- `arc_preview`
+- compatibility fields: `processedSvg`, `arcCircles`, `cornerCount`, `pathCount`, `updatedPathCount`
+
+`summary` contains:
+- `paths_found`
+- `corners_found`
+- `corners_rounded`
+- `corners_skipped`
+- `processing_ms`
+
+## Input Validation and Limits
+
+Backend guards:
+- Max input size: `5 MB`
+- Allowed content types: `multipart/form-data`, `image/svg+xml`, `application/json`
+- Empty input -> `400 {"ok": false, "error": "empty_input"}`
+- Oversized input -> `413 {"ok": false, "error": "file_too_large"}`
+- Parse failure -> `422 {"ok": false, "error": "parse_error: ..."}`
+
+## Analyze Cache
+
+`/api/analyze` uses an in-process LRU cache.
+
+- First request for an SVG/options pair: `X-Cache: MISS`
+- Same SVG/options again: `X-Cache: HIT`
+- Clear via `DELETE /api/cache`
+
+Cache key includes SVG hash, relevant options, and API revision.
+
+## Advanced Detection and Rounding Notes
+
+The engine is designed for real exported artwork where corners are often messy.
+
+Key robustness features include:
+- Safe tangent normalization with degenerate guards
+- Zero-length segment protection
+- Shrink-on-failure fillet validation with minimum radius floor
+- Curve-aware fillet fallback solver for difficult joins
+- Legacy-compat fallback path for missing trim candidate matching
+- Tiny-gap stitching and degenerate segment sanitization before and after rounding
+- Adjacency constraints when endpoints are shared across paths
+
+This reduces common failures where corners are detected but arcs were previously skipped.
+
+## Frontend-Backend Compatibility
+
+Frontend checks backend `api_revision` and warns if backend looks outdated.
+
+If you see:
+- `Backend looks outdated. Restart backend to use latest corner detection.`
+
+Then stop old backend processes and restart from this repo root:
 
 ```bash
 python api_server.py
 ```
 
-By default the backend listens on `http://127.0.0.1:5050` (override with `SVG_BACKEND_PORT`).
+Also hard refresh the browser.
 
-Or package app:
+## Troubleshooting
 
-```bash
-python -m flask --app backend.app:create_app run --port 5050
-```
+## 1) Frontend buttons do nothing or stale output
 
-Production (Gunicorn):
+- Ensure backend is running on `127.0.0.1:5050`
+- Call `DELETE /api/cache`
+- Hard refresh frontend
+- Re-upload SVG
 
-```bash
-make run-prod
-```
+## 2) Corners detected but Finalize Round looked wrong
 
-Equivalent commands:
+Typical causes:
+- Tiny duplicate nodes at visual corners
+- Near-closed subpaths with micro endpoint gaps
+- Over-trim conflicts between neighboring corners
 
-```bash
-make run-dev
-gunicorn backend.wsgi:app --workers 2 --timeout 120 --bind 127.0.0.1:5050 --log-level info
-```
+Current pipeline includes cleanup and retry logic for these.
 
-### Frontend
+## 3) Backend connection error in UI
 
-```bash
-cd frontend
-npm run dev
-```
-
-Dev proxy targets `http://127.0.0.1:5050` by default (override with `VITE_PROXY_TARGET`).
-
-## API
-
-### `GET /api/health`
-Health and limits.
-
-### `GET /api/profiles`
-Available detection modes, radius profiles, export modes.
-
-### `POST /api/analyze`
-Analyze only. Returns corners + diagnostics + optional overlay SVG.
-
-### `POST /api/round`
-Apply rounding and return updated SVG.
-
-### `POST /api/process`
-Compatibility route for existing frontend behavior.
-
-### `DELETE /api/cache`
-Clears analyze cache entries.
-
-Request guards:
-- allowed content types: `image/svg+xml`, `multipart/form-data`, `application/json`
-- empty input: `400 {"ok": false, "error": "empty_input"}`
-- oversized input: `413 {"ok": false, "error": "file_too_large"}`
-- malformed SVG parse failure: `422 {"ok": false, "error": "parse_error: ..."}`
-
-Analyze responses include `X-Cache: MISS` for fresh compute and `X-Cache: HIT` for cached results.
-
-Common response shape:
-
-```json
-{
-  "ok": true,
-  "summary": {
-    "paths_found": 1,
-    "corners_found": 6,
-    "corners_rounded": 4,
-    "corners_skipped": 2,
-    "processing_ms": 12.7
-  },
-  "corners": [],
-  "rejected_corners": [],
-  "diagnostics": {},
-  "svg": "..."
-}
-```
-
-## Modes and Profiles
-
-### Detection modes
-- `fast`: tangent-angle detection optimized for speed
-- `accurate`: improved tangent sampling and severity scoring
-- `preserve_shape`: conservative detection for logos/tiny detail
-- `hybrid_advanced`: fused tangent + local-turn + curvature detector for production corner finding
-- `strict_junction`: join-only sharp-corner detector (20°–160° band, min segment length floor, closure join checks, geometric dedupe)
-
-## Advanced Corner Detection
-
-`hybrid_advanced` runs a 3-layer geometry-driven pipeline:
-
-1. **Join tangent discontinuity**
-   - robust start/end tangents with confidence
-   - catches line-line, line-curve, curve-line, curve-curve sharp joins
-2. **Local sampled turning-angle peaks**
-   - adaptive arc-length sampling
-   - catches sharp-looking local turns that endpoint-only logic can miss
-3. **Localized curvature spikes**
-   - curvature profiles on curves/arcs
-   - emphasizes sharp spikes and suppresses broad smooth bends
-
-All candidate evidence is merged spatially and fused with weighted scoring:
-
-`final_corner_score = 0.25*tangent + 0.55*local_turn + 0.20*curvature`
-
-The detector returns backward-compatible fields plus advanced diagnostics.
-
-For glyph-heavy files where you want strict visible corner joins (and fewer interior curve peaks), use:
+Start backend:
 
 ```bash
-python detect_svg_corners.py input.svg output.svg --detection-mode strict_junction --debug
+python api_server.py
 ```
 
-Example detected-corner payload:
+## 4) Port conflicts on 5050
 
-```json
-{
-  "path_id": 0,
-  "node_id": 12,
-  "x": 120.41,
-  "y": 56.03,
-  "angle_deg": 97.4,
-  "join_type": "corner",
-  "source_type": "join",
-  "tangent_angle_deg": 97.4,
-  "local_turn_deg": 89.1,
-  "curvature_peak": 0.3221,
-  "tangent_discontinuity_score": 0.61,
-  "local_turn_score": 0.49,
-  "curvature_spike_score": 0.28,
-  "endpoint_confidence": 0.93,
-  "final_corner_score": 0.57,
-  "confidence": 0.71,
-  "detection_reason": "join_tangent_discontinuity,local_turn_peak"
-}
-```
-
-### Radius profiles
-- `fixed`: exact requested radius
-- `vectorizer_legacy`: backward-compatible heuristic
-- `adaptive`: balanced safe default
-- `preserve_shape`: smaller radii on dense/tiny geometry
-- `aggressive`: larger radii when risk is low
-
-## Frontend workflow
-
-1. Upload SVG
-2. Click **Finalize SVG** (single click runs detect + arc preview + finalize round)
-3. Watch optimization progress animation while processing
-4. Optionally override per-corner radius values, use per-row **Reset** or **Reset all overrides**
-5. Click **Finalize SVG** again to apply overrides
-6. Download finalized SVG
-
-Notes:
-- Frontend is intentionally minimal for production flow.
-- Advanced tuning remains available via CLI/API options.
-- If backend is unreachable, a top-level offline state is shown: "Backend offline — make sure the Flask server is running on port 5050."
-
-## Tests
+Set port env var before backend start:
 
 ```bash
-py -m pytest -q
+set SVG_BACKEND_PORT=5051
+python api_server.py
 ```
 
-Current suite includes API integration, parser behavior, tangents, detection, radius profiles, fillet validation, adjacency handling, legacy runtime coverage, and round pipeline parse-validity.
+Then point frontend proxy/API base accordingly.
 
-## Screenshots
+## Development
 
-- `docs/screenshots/ui-analyze.png` (placeholder)
-- `docs/screenshots/ui-round.png` (placeholder)
+## Run tests
 
-## Limitations / Known Issues
+```bash
+python -m pytest -q
+```
 
-- Exact curve-trim intersection solving still relies on robust fallback in some complex self-intersections.
-- For highly transformed nested arc-heavy artwork, transforms are baked into geometry and primitive tags may be converted to `<path>` after rounding.
-- Legacy realtime window mode currently uses the compatibility engine.
+## Important Scripts
 
-## Roadmap
+- `run_all.bat`: start backend + frontend quickly
+- `git_ai_push.bat`: stage all, commit message `AI`, push
 
-- stronger local self-intersection solver for curve-curve fillets
-- optional undo stack and per-corner lock states in frontend
-- batch processing mode for SVG folders
+## Project Structure
+
+```text
+SVGCornerSmooth/
+  api_server.py
+  detect_svg_corners.py
+  run_all.bat
+  git_ai_push.bat
+  requirements.txt
+  Makefile
+  README.md
+
+  svg_corner_smooth/
+    __init__.py
+    _legacy.py
+    legacy_runtime.py
+    curve_solver.py
+    cli.py
+    constants.py
+    models.py
+    parser.py
+    tangents.py
+    sampling.py
+    curvature.py
+    detect.py
+    fillet.py
+    radius_profiles.py
+    diagnostics.py
+    overlay.py
+    rounder.py
+    validate.py
+    utils.py
+
+  backend/
+    app.py
+    config.py
+    schemas.py
+    wsgi.py
+
+  frontend/
+    src/
+      App.jsx
+      components/
+      hooks/
+      lib/
+
+  tests/
+    fixtures/
+    test_*.py
+```
+
+## Environment Variables
+
+Backend:
+- `SVG_BACKEND_HOST` (default `127.0.0.1`)
+- `SVG_BACKEND_PORT` (default `5050`)
+- `SVG_BACKEND_DEBUG` (`0`/`1`)
+- `SVG_MAX_UPLOAD_MB`
+- `SVG_MAX_UPLOAD_BYTES`
+- `SVG_CORS_ORIGIN`
+
+Frontend:
+- `VITE_PROXY_TARGET` (dev proxy target)
+- `VITE_API_BASE` (optional direct API base)
+
+## Current Status
+
+- Detection and rounding pipeline is production-focused for local workflows.
+- API routes are tested.
+- Frontend supports one-click finalize flow plus legacy controls.
+- Readme is intended to be enough for onboarding without extra chat context.

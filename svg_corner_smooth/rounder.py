@@ -10,6 +10,7 @@ from typing import Any
 from svgpathtools import Path as SvgPath
 
 from . import legacy_runtime as _legacy
+from .curve_solver import solve_fillet_for_corner_rounding
 from .detect import detect_corners
 from .fillet import FilletSettings, shrink_radius_until_valid
 from .models import CornerSeverity, DiagnosticsReport, ProcessingOptions, ProcessingResult, ProcessingSummary, RejectedCorner
@@ -239,11 +240,11 @@ def _allow_rounding(corner: CornerSeverity, angle_threshold: float) -> tuple[boo
     diagnostics but unsafe to fillet with large radii.
     """
     score = float(corner.final_corner_score or corner.severity_score or 0.0)
-    if score < 0.05:
+    if score < 0.02:
         return False, "low_confidence_corner"
 
     mild_turn_limit = max(55.0, angle_threshold + 10.0)
-    if corner.angle_deg < mild_turn_limit and score < 0.12:
+    if corner.angle_deg < mild_turn_limit and score < 0.06:
         return False, "low_angle_low_confidence"
 
     return True, None
@@ -480,9 +481,12 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
     legacy_selected: list[Any] = []
     legacy_by_path: dict[int, list[Any]] = defaultdict(list)
     legacy_origin_key_by_id: dict[int, str] = {}
+    sanitize_length_tolerance = max(1e-9, min(0.25, float(options.min_segment_length) * 0.05))
+    stitch_tolerance = max(1e-6, sanitize_length_tolerance * 2.0)
 
     for entry in parsed_doc.entries:
-        entry.path = _sanitize_path_segments(entry.path, length_tolerance=1e-9)
+        entry.path = _sanitize_path_segments(entry.path, length_tolerance=sanitize_length_tolerance)
+        _stitch_tiny_path_gaps(entry.path, tolerance=stitch_tolerance)
         detected = detect_corners(
             path=entry.path,
             path_id=entry.path_id,
@@ -511,14 +515,27 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
             if legacy_corner is None:
                 synthesized = _synthesize_legacy_corner(corner, entry.path)
                 if synthesized is None:
-                    diagnostics.warnings.append(
-                        f"Missing trim candidate for path {corner.path_id} node {corner.node_id}; skipped for rounding."
+                    # Last-resort fallback: validate directly with curve solver and
+                    # create a minimal legacy-compatible trim candidate.
+                    direct_payload = solve_fillet_for_corner_rounding(
+                        path=entry.path,
+                        corner=corner,
+                        desired_radius=max(0.5, float(options.corner_radius)),
                     )
-                    continue
-                legacy_corner = synthesized
-                diagnostics.warnings.append(
-                    f"Synthesized trim candidate for path {corner.path_id} node {corner.node_id}."
-                )
+                    if direct_payload is None:
+                        diagnostics.warnings.append(
+                            f"Missing trim candidate for path {corner.path_id} node {corner.node_id}; skipped for rounding."
+                        )
+                        continue
+                    legacy_corner = _legacy.CornerDetection(**direct_payload)
+                    diagnostics.warnings.append(
+                        f"Curve-solver fallback trim candidate for path {corner.path_id} node {corner.node_id}."
+                    )
+                else:
+                    legacy_corner = synthesized
+                    diagnostics.warnings.append(
+                        f"Synthesized trim candidate for path {corner.path_id} node {corner.node_id}."
+                    )
             elif legacy_corner in candidate_pool:
                 # Keep one-to-one mapping between detected and trim candidates.
                 candidate_pool.remove(legacy_corner)
@@ -622,7 +639,8 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
                 debug=options.debug,
                 per_corner_radii=used_per_corner,
             )
-            _stitch_tiny_path_gaps(rounded_path, tolerance=1e-6)
+            rounded_path = _sanitize_path_segments(rounded_path, length_tolerance=sanitize_length_tolerance)
+            _stitch_tiny_path_gaps(rounded_path, tolerance=stitch_tolerance)
             entry.path = rounded_path
             write_path_back_to_element(entry, rounded_path, parsed_doc.namespace)
 

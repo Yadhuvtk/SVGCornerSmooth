@@ -1158,7 +1158,47 @@ def build_corner_rounding(
 ) -> Optional[CornerRounding]:
     """Construct trimming + arc geometry for one detected corner."""
     target_radius = effective_corner_radius(corner, desired_radius, radius_profile=radius_profile)
+    previous_segment = path[prev_index]
+    next_segment = path[next_index]
+
     rough_geometry = compute_corner_arc_geometry(corner, desired_radius=target_radius)
+    prev_is_curve = isinstance(previous_segment, (CubicBezier, QuadraticBezier, Arc))
+    next_is_curve = isinstance(next_segment, (CubicBezier, QuadraticBezier, Arc))
+    if rough_geometry is None or prev_is_curve or next_is_curve:
+        try:
+            from .curve_solver import solve_curve_fillet
+
+            curve_result = solve_curve_fillet(
+                prev_segment=previous_segment,
+                next_segment=next_segment,
+                desired_radius=target_radius,
+                corner_point=complex(corner.x, corner.y),
+            )
+        except Exception:
+            curve_result = None
+
+        if curve_result is not None and curve_result.quality_score >= 0.5:
+            try:
+                arc_segment = Arc(
+                    start=curve_result.arc_start,
+                    radius=complex(curve_result.arc_radius, curve_result.arc_radius),
+                    rotation=0.0,
+                    large_arc=False,
+                    sweep=bool(curve_result.sweep_flag),
+                    end=curve_result.arc_end,
+                )
+                return CornerRounding(
+                    node_id=corner.node_id,
+                    prev_index=prev_index,
+                    next_index=next_index,
+                    prev_trim_t=curve_result.prev_trim_t,
+                    next_trim_t=curve_result.next_trim_t,
+                    arc_segment=arc_segment,
+                    used_radius=curve_result.arc_radius,
+                )
+            except Exception:
+                pass
+
     if rough_geometry is None:
         return None
 
@@ -1167,9 +1207,6 @@ def build_corner_rounding(
     trim_distance = abs(node_point - rough_arc_start)
     if trim_distance <= EPSILON:
         return None
-
-    previous_segment = path[prev_index]
-    next_segment = path[next_index]
 
     prev_total_length = safe_segment_length(previous_segment)
     next_total_length = safe_segment_length(next_segment)
@@ -1345,18 +1382,45 @@ def round_path_geometry(
                     else:
                         removed_node = end_node_index
 
-                    removed = rounding_by_node.pop(removed_node, None)
-                    if removed is None:
+                    removed_rounding = rounding_by_node.pop(removed_node, None)
+                    if removed_rounding is None:
                         continue
+                    retry_applied = False
+                    retry_corner = corner_by_node.get(removed_node)
+                    retry_radius = removed_rounding.used_radius * 0.5
+                    if retry_corner is not None and retry_radius >= 0.5:
+                        retry_rounding = build_corner_rounding(
+                            path=path,
+                            corner=retry_corner,
+                            prev_index=removed_rounding.prev_index,
+                            next_index=removed_rounding.next_index,
+                            desired_radius=retry_radius,
+                            radius_profile="fixed",
+                            samples_per_curve=samples_per_curve,
+                        )
+                        if retry_rounding is not None:
+                            rounding_by_node[removed_node] = retry_rounding
+                            retry_applied = True
+
                     changed = True
                     if debug:
-                        debug_log(
-                            debug,
-                            (
-                                f"Path {path_id} node {removed_node}: dropped overlapping fillet "
-                                f"(segment={segment_index}, t_start={t_start:.4f}, t_end={t_end:.4f})."
-                            ),
-                        )
+                        if retry_applied:
+                            debug_log(
+                                debug,
+                                (
+                                    f"Path {path_id} node {removed_node}: overlap retry with smaller fillet "
+                                    f"(segment={segment_index}, t_start={t_start:.4f}, t_end={t_end:.4f}, "
+                                    f"radius={retry_radius:.4f})."
+                                ),
+                            )
+                        else:
+                            debug_log(
+                                debug,
+                                (
+                                    f"Path {path_id} node {removed_node}: dropped overlapping fillet "
+                                    f"(segment={segment_index}, t_start={t_start:.4f}, t_end={t_end:.4f})."
+                                ),
+                            )
                     break
 
         subpath_segments: list[Any] = []
