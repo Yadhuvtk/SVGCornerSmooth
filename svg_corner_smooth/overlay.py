@@ -33,10 +33,10 @@ def append_arc_preview_from_severity(
     path_lookup: Optional[dict[int, Any]] = None,
 ) -> list[dict[str, float]]:
     """
-    Draw arc preview circles for detected corners with geometry-aware centers.
+    Draw arc preview circles for detected corners.
 
-    Uses legacy corner tangent geometry when available (for meaningful arc center).
-    Falls back to a small corner-centered circle when geometry is unavailable.
+    Radius uses legacy/estimated geometry where available, but markers are
+    anchored to detected corner points for clearer UI alignment.
     """
     overlay_group = ET.Element(svg_tag(namespace, "g"), {"id": "arc-preview-overlay"})
     root.append(overlay_group)
@@ -289,6 +289,10 @@ def append_arc_preview_from_severity(
         # visible but avoid an oversized "wrong-looking" ring.
         if geometry_source == "fallback" and desired_radius < 0.5:
             display_radius = max(3.0, min_display_radius * 0.45)
+
+        # Keep preview marker anchored to detected corner for visual clarity.
+        cx = float(corner.x)
+        cy = float(corner.y)
 
         overlay_group.append(
             ET.Element(

@@ -3,13 +3,25 @@ from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 from svgpathtools import parse_path
+from svgpathtools import Line as SvgLine, Path as SvgPath
 
 from svg_corner_smooth import _legacy
 from svg_corner_smooth.models import CornerSeverity
 from svg_corner_smooth.overlay import append_arc_preview_from_severity
 from svg_corner_smooth.parser import extract_namespace
 from svg_corner_smooth.parser import parse_svg_document
-from svg_corner_smooth.rounder import _allow_rounding, _match_legacy_corner, analyze_svg, process_svg
+from svg_corner_smooth.rounder import (
+    _allow_rounding,
+    _compute_radius_map,
+    _match_legacy_corner,
+    _requested_radius_for_legacy_corner,
+    _sanitize_path_segments,
+    _split_corner_key,
+    _stitch_tiny_path_gaps,
+    _synthesize_legacy_corner,
+    analyze_svg,
+    process_svg,
+)
 from svg_corner_smooth.validate import build_options
 
 
@@ -188,5 +200,108 @@ def test_preview_arcs_estimates_geometry_when_legacy_match_missing() -> None:
     assert len(preview) == 1
     item = preview[0]
     assert item["source"] == "estimated_bisector_center"
-    assert item["center_x"] < corner.x
-    assert item["center_y"] > corner.y
+    # Marker should stay anchored on detected corner point in UI.
+    assert item["center_x"] == corner.x
+    assert item["center_y"] == corner.y
+    assert item["display_radius"] >= item["used_radius"] >= 1.6
+
+
+def test_stitch_tiny_path_gaps_snaps_micro_discontinuity() -> None:
+    path = SvgPath(
+        SvgLine(complex(0, 0), complex(10, 0)),
+        SvgLine(complex(10.0000001, 0), complex(10, 10)),
+    )
+    before = abs(path[1].start - path[0].end)
+    assert before > 0.0
+
+    _stitch_tiny_path_gaps(path, tolerance=1e-5)
+
+    after = abs(path[1].start - path[0].end)
+    assert after == 0.0
+
+
+def test_synthesize_legacy_corner_for_strict_join_when_legacy_missing() -> None:
+    path = SvgPath(
+        SvgLine(complex(0, 0), complex(10, 0)),
+        SvgLine(complex(10.5, 0), complex(10.5, 10)),
+    )
+    corner = _sample_corner(
+        node_id=1,
+        x=10.5,
+        y=0.0,
+        angle_deg=90.0,
+        source_type="join",
+        segment_index_before=0,
+        segment_index_after=1,
+        prev_segment_length=10.0,
+        next_segment_length=10.0,
+        debug={"incoming_tangent": [1.0, 0.0], "outgoing_tangent": [0.0, 1.0]},
+    )
+
+    synthesized = _synthesize_legacy_corner(corner, path)
+    assert synthesized is not None
+    assert synthesized.node_id == 1
+    assert abs(complex(synthesized.x, synthesized.y) - complex(10.5, 0.0)) <= 0.5
+
+
+def test_synthesize_legacy_corner_picks_adjacent_pair_when_indices_skip_tiny_segment() -> None:
+    path = SvgPath(
+        SvgLine(complex(0, 0), complex(10, 0)),
+        SvgLine(complex(10, 0), complex(10.000001, 0.0)),
+        SvgLine(complex(10.000001, 0.0), complex(10.000001, 10)),
+    )
+    corner = _sample_corner(
+        node_id=2,
+        x=10.0,
+        y=0.0,
+        angle_deg=90.0,
+        source_type="join",
+        segment_index_before=0,
+        segment_index_after=2,
+        prev_segment_length=10.0,
+        next_segment_length=10.0,
+        debug={"incoming_tangent": [1.0, 0.0], "outgoing_tangent": [0.0, 1.0]},
+    )
+
+    synthesized = _synthesize_legacy_corner(corner, path)
+    assert synthesized is not None
+    # Adjacent usable join should be selected (0->1 or 1->2), not rejected.
+    assert synthesized.node_id in {1, 2}
+
+
+def test_requested_radius_prefers_detected_corner_key_when_legacy_node_differs() -> None:
+    legacy_corner = SimpleNamespace(path_id=0, node_id=252)
+    radius_map = {"0:251": 6.75}
+    key_map = {id(legacy_corner): "0:251"}
+
+    requested, legacy_key, source_key = _requested_radius_for_legacy_corner(
+        legacy_corner=legacy_corner,
+        radius_map=radius_map,
+        legacy_origin_key_by_id=key_map,
+    )
+
+    assert requested == 6.75
+    assert legacy_key == "0:252"
+    assert source_key == "0:251"
+    assert _split_corner_key(source_key, fallback_path_id=0, fallback_node_id=252) == (0, 251)
+
+
+def test_compute_radius_map_caps_radius_for_tight_neighbor_spacing() -> None:
+    options = build_options(corner_radius=14.0, radius_profile="fixed")
+    c1 = _sample_corner(path_id=0, node_id=10, x=0.0, y=0.0, risk_score=0.1)
+    c2 = _sample_corner(path_id=0, node_id=11, x=10.0, y=0.0, risk_score=0.1)
+    c3 = _sample_corner(path_id=0, node_id=12, x=22.0, y=0.0, risk_score=0.1)
+
+    radius_map = _compute_radius_map([c1, c2, c3], options)
+    assert radius_map["0:11"] < 14.0
+    assert radius_map["0:11"] <= 0.45 * 10.0 + 1e-9
+
+
+def test_sanitize_path_segments_removes_zero_length_segments() -> None:
+    path = SvgPath(
+        SvgLine(complex(0, 0), complex(10, 0)),
+        SvgLine(complex(10, 0), complex(10, 0)),
+        SvgLine(complex(10, 0), complex(10, 8)),
+    )
+    cleaned = _sanitize_path_segments(path, length_tolerance=1e-9)
+    assert len(cleaned) == 2

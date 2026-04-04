@@ -7,6 +7,8 @@ import time
 from collections import defaultdict
 from typing import Any
 
+from svgpathtools import Path as SvgPath
+
 from . import legacy_runtime as _legacy
 from .detect import detect_corners
 from .fillet import FilletSettings, shrink_radius_until_valid
@@ -14,11 +16,42 @@ from .models import CornerSeverity, DiagnosticsReport, ProcessingOptions, Proces
 from .overlay import apply_overlay
 from .parser import build_adjacency_graph, parse_svg_document, write_path_back_to_element
 from .radius_profiles import RadiusContext, compute_corner_radius
+from .tangents import segment_end_tangent, segment_start_tangent, tangent_angle_degrees
+from .utils import safe_segment_length
 from .validate import validate_processing_options
 
 
 def _key(path_id: int, node_id: int) -> str:
     return f"{path_id}:{node_id}"
+
+
+def _split_corner_key(key: str, fallback_path_id: int, fallback_node_id: int) -> tuple[int, int]:
+    """Parse `path_id:node_id` key safely with a legacy fallback."""
+    try:
+        path_raw, node_raw = key.split(":", 1)
+        return int(path_raw), int(node_raw)
+    except (ValueError, TypeError):
+        return int(fallback_path_id), int(fallback_node_id)
+
+
+def _requested_radius_for_legacy_corner(
+    legacy_corner: Any,
+    radius_map: dict[str, float],
+    legacy_origin_key_by_id: dict[int, str],
+) -> tuple[float, str, str]:
+    """
+    Resolve requested radius for a legacy trim corner.
+
+    Returns `(requested_radius, legacy_key, source_key)` where:
+    - `legacy_key` is the trim corner id used by legacy fillet geometry
+    - `source_key` is the original detected corner id used for scoring/radius
+    """
+    legacy_key = _key(legacy_corner.path_id, legacy_corner.node_id)
+    source_key = legacy_origin_key_by_id.get(id(legacy_corner), legacy_key)
+    requested = radius_map.get(source_key)
+    if requested is None:
+        requested = radius_map.get(legacy_key, 0.0)
+    return float(requested), legacy_key, source_key
 
 
 def _distance(a: CornerSeverity, b: CornerSeverity) -> float:
@@ -105,6 +138,99 @@ def _match_legacy_corner(
     return None
 
 
+def _synthesize_legacy_corner(corner: CornerSeverity, path: Any) -> Any | None:
+    """
+    Build a legacy-style trim corner from detected geometric evidence.
+
+    This keeps rounding available when strict/hybrid detection finds a corner
+    that the legacy candidate scan skipped due tiny local segments.
+    """
+    if path is None or len(path) < 2:
+        return None
+
+    raw_next = int(corner.segment_index_after if corner.segment_index_after >= 0 else corner.node_id)
+    raw_prev = int(corner.segment_index_before)
+    if raw_next < 0 or raw_next >= len(path):
+        return None
+    if raw_prev < 0 or raw_prev >= len(path):
+        raw_prev = (raw_next - 1) % len(path)
+
+    corner_point = complex(float(corner.x), float(corner.y))
+
+    def _candidate_indices(seed: int) -> list[int]:
+        out: list[int] = []
+        for index in (seed - 1, seed, seed + 1):
+            if 0 <= index < len(path) and index not in out:
+                out.append(index)
+        return out
+
+    prev_options = _candidate_indices(raw_prev)
+    next_options = _candidate_indices(raw_next)
+
+    best_pair: tuple[int, int, complex, float] | None = None
+    for prev_index in prev_options:
+        prev_seg = path[prev_index]
+        prev_end = complex(prev_seg.end)
+        for next_index in next_options:
+            if next_index == prev_index:
+                continue
+            next_seg = path[next_index]
+            next_start = complex(next_seg.start)
+            gap = abs(prev_end - next_start)
+            if gap > 2.0:
+                continue
+            join_point = (prev_end + next_start) * 0.5
+            point_distance = abs(join_point - corner_point)
+            fit_score = (gap * 2.0) + point_distance
+            if best_pair is None or fit_score < best_pair[3]:
+                best_pair = (prev_index, next_index, join_point, fit_score)
+
+    if best_pair is None:
+        return None
+
+    prev_index, next_index, join_point, _ = best_pair
+    prev_seg = path[prev_index]
+    next_seg = path[next_index]
+
+    incoming_vec: complex | None = None
+    outgoing_vec: complex | None = None
+    incoming_debug = corner.debug.get("incoming_tangent")
+    outgoing_debug = corner.debug.get("outgoing_tangent")
+    if isinstance(incoming_debug, list) and len(incoming_debug) == 2:
+        incoming_vec = complex(float(incoming_debug[0]), float(incoming_debug[1]))
+    if isinstance(outgoing_debug, list) and len(outgoing_debug) == 2:
+        outgoing_vec = complex(float(outgoing_debug[0]), float(outgoing_debug[1]))
+
+    if incoming_vec is None:
+        incoming_vec, incoming_conf = segment_end_tangent(prev_seg)
+        if incoming_conf <= 0.0:
+            return None
+    if outgoing_vec is None:
+        outgoing_vec, outgoing_conf = segment_start_tangent(next_seg)
+        if outgoing_conf <= 0.0:
+            return None
+
+    prev_len = float(corner.prev_segment_length or safe_segment_length(prev_seg))
+    next_len = float(corner.next_segment_length or safe_segment_length(next_seg))
+    if prev_len <= 1e-9 or next_len <= 1e-9:
+        return None
+
+    angle = float(corner.angle_deg or tangent_angle_degrees(incoming_vec, outgoing_vec))
+    return _legacy.CornerDetection(
+        path_id=int(corner.path_id),
+        node_id=int(next_index),
+        x=float(join_point.real),
+        y=float(join_point.imag),
+        angle_deg=angle,
+        incoming_dx=float(incoming_vec.real),
+        incoming_dy=float(incoming_vec.imag),
+        outgoing_dx=float(outgoing_vec.real),
+        outgoing_dy=float(outgoing_vec.imag),
+        prev_segment_length=prev_len,
+        next_segment_length=next_len,
+    )
+
+
 def _allow_rounding(corner: CornerSeverity, angle_threshold: float) -> tuple[bool, str | None]:
     """
     Gate fragile corners before geometric fillet application.
@@ -152,6 +278,17 @@ def _compute_radius_map(
             requested_radius=options.corner_radius,
             profile=options.radius_profile,
         )
+        # Keep neighboring rounded corners compatible on short spans:
+        # if two corners are close, cap radius so both fillets can coexist
+        # instead of one being dropped later by overlap conflict resolution.
+        nearest_neighbor = min(prev_dist, next_dist)
+        if nearest_neighbor != float("inf"):
+            safe_cap = max(0.0, nearest_neighbor * 0.45)
+            if radius > safe_cap:
+                radius = safe_cap
+                corner.diagnostic_notes.append(
+                    f"radius_capped_by_neighbor_spacing:{safe_cap:.4f}"
+                )
         corner.suggested_radius = radius
         radius_map[key] = radius
 
@@ -251,6 +388,67 @@ def _apply_adjacency_constraints(
     return adjacency_payload
 
 
+def _stitch_tiny_path_gaps(path: Any, tolerance: float = 1e-6) -> None:
+    """
+    Snap near-contiguous segment joins to exact continuity.
+
+    Rounding can introduce tiny floating-point gaps (for example ~1e-13) between
+    adjacent segment endpoints. Some SVG serializers emit new `M` commands for
+    these gaps, which can create visible fill artifacts. This stitch keeps real
+    subpath breaks intact while removing micro-gaps.
+    """
+    if path is None or len(path) < 2:
+        return
+
+    tol = max(1e-12, float(tolerance))
+
+    # Pass 1: snap adjacent joins when gap is tiny.
+    for index in range(1, len(path)):
+        prev_seg = path[index - 1]
+        curr_seg = path[index]
+        gap = abs(complex(curr_seg.start) - complex(prev_seg.end))
+        if gap <= tol:
+            curr_seg.start = prev_seg.end
+
+    # Pass 2: close each near-closed contiguous run.
+    run_start = 0
+    for index in range(1, len(path) + 1):
+        boundary = index == len(path)
+        if not boundary:
+            gap = abs(complex(path[index].start) - complex(path[index - 1].end))
+            boundary = gap > tol
+
+        if not boundary:
+            continue
+
+        run_end = index - 1
+        if run_end > run_start:
+            closure_gap = abs(complex(path[run_start].start) - complex(path[run_end].end))
+            if closure_gap <= tol:
+                path[run_start].start = path[run_end].end
+        run_start = index
+
+
+def _sanitize_path_segments(path: Any, length_tolerance: float = 1e-9) -> Any:
+    """
+    Remove degenerate near-zero-length segments from a path.
+
+    Zero-length segments are common in exported glyph outlines and can break
+    corner indexing in fillet construction (the "previous segment" becomes a
+    zero segment). Keeping only drawable segments stabilizes rounding behavior.
+    """
+    if path is None or len(path) == 0:
+        return path
+
+    tol = max(1e-12, float(length_tolerance))
+    kept = [segment for segment in path if safe_segment_length(segment) > tol]
+    if not kept:
+        return path
+    if len(kept) == len(path):
+        return path
+    return SvgPath(*kept)
+
+
 def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> ProcessingResult:
     """Process a parsed SVG document and return corner diagnostics + output SVG."""
     validate_processing_options(options)
@@ -281,8 +479,10 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
     severity_corners: list[CornerSeverity] = []
     legacy_selected: list[Any] = []
     legacy_by_path: dict[int, list[Any]] = defaultdict(list)
+    legacy_origin_key_by_id: dict[int, str] = {}
 
     for entry in parsed_doc.entries:
+        entry.path = _sanitize_path_segments(entry.path, length_tolerance=1e-9)
         detected = detect_corners(
             path=entry.path,
             path_id=entry.path_id,
@@ -309,12 +509,22 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
 
             legacy_corner = _match_legacy_corner(corner, candidate_pool)
             if legacy_corner is None:
+                synthesized = _synthesize_legacy_corner(corner, entry.path)
+                if synthesized is None:
+                    diagnostics.warnings.append(
+                        f"Missing trim candidate for path {corner.path_id} node {corner.node_id}; skipped for rounding."
+                    )
+                    continue
+                legacy_corner = synthesized
                 diagnostics.warnings.append(
-                    f"Missing trim candidate for path {corner.path_id} node {corner.node_id}; skipped for rounding."
+                    f"Synthesized trim candidate for path {corner.path_id} node {corner.node_id}."
                 )
-                continue
+            elif legacy_corner in candidate_pool:
+                # Keep one-to-one mapping between detected and trim candidates.
+                candidate_pool.remove(legacy_corner)
 
             legacy_selected.append(legacy_corner)
+            legacy_origin_key_by_id[id(legacy_corner)] = _key(corner.path_id, corner.node_id)
             if should_round:
                 legacy_by_path[corner.path_id].append(legacy_corner)
 
@@ -351,14 +561,23 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
             used_per_corner: dict[str, float] = {}
             accepted: list[Any] = []
             for legacy_corner in path_corners:
-                key = _key(legacy_corner.path_id, legacy_corner.node_id)
-                requested = radius_map.get(key, 0.0)
+                requested, legacy_key, source_key = _requested_radius_for_legacy_corner(
+                    legacy_corner=legacy_corner,
+                    radius_map=radius_map,
+                    legacy_origin_key_by_id=legacy_origin_key_by_id,
+                )
+
+                source_path_id, source_node_id = _split_corner_key(
+                    source_key,
+                    fallback_path_id=legacy_corner.path_id,
+                    fallback_node_id=legacy_corner.node_id,
+                )
                 if requested <= 0.0:
                     skipped_count += 1
                     diagnostics.rejected_corners.append(
                         RejectedCorner(
-                            path_id=legacy_corner.path_id,
-                            node_id=legacy_corner.node_id,
+                            path_id=source_path_id,
+                            node_id=source_node_id,
                             reason="radius_zero",
                             attempted_radius=requested,
                             final_radius=0.0,
@@ -375,8 +594,8 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
                     skipped_count += 1
                     diagnostics.rejected_corners.append(
                         RejectedCorner(
-                            path_id=legacy_corner.path_id,
-                            node_id=legacy_corner.node_id,
+                            path_id=source_path_id,
+                            node_id=source_node_id,
                             reason=validation.reason,
                             attempted_radius=requested,
                             final_radius=validation.radius,
@@ -387,7 +606,7 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
                     continue
 
                 accepted.append(legacy_corner)
-                used_per_corner[key] = validation.radius
+                used_per_corner[legacy_key] = validation.radius
                 rounded_count += 1
 
             if not accepted:
@@ -403,6 +622,7 @@ def process_parsed_document(parsed_doc: Any, options: ProcessingOptions) -> Proc
                 debug=options.debug,
                 per_corner_radii=used_per_corner,
             )
+            _stitch_tiny_path_gaps(rounded_path, tolerance=1e-6)
             entry.path = rounded_path
             write_path_back_to_element(entry, rounded_path, parsed_doc.namespace)
 
